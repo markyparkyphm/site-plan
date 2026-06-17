@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Site Planner</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="sidebar">
+    <h1>Site Planner</h1>
+    <p id="instructions">
+      Click on the map to place boundary points.<br>
+      Click the <span style="color:#4ade80">green dot</span> to close the polygon.
+    </p>
+    <div id="actions">
+      <button id="btn-use-boundary" disabled>Use Boundary</button>
+      <button id="btn-clear">Clear</button>
+    </div>
+    <div id="status"></div>
+  </div>
+  <div id="map"></div>
+
+  <script src="config.js"></script>
+  <script>
+    window.initMap = function () {
+      import('./js/main.js').then(function (m) { m.init(); }).catch(console.error);
+    };
+
+    if (!window.MAPS_API_KEY) {
+      document.getElementById('map').textContent = 'Error: MAPS_API_KEY missing from config.js';
+    } else {
+      var s = document.createElement('script');
+      s.src = 'https://maps.googleapis.com/maps/api/js?key=' + window.MAPS_API_KEY + '&callback=initMap&v=weekly';
+      s.async = true;
+      document.head.appendChild(s);
+    }
+  </script>
+</body>
+</html>

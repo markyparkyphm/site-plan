@@ -1,0 +1,45 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; font-family: system-ui, sans-serif; }
+
+body { display: flex; }
+
+#sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: #111827;
+  color: #e5e7eb;
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+h1 { font-size: 1.1rem; font-weight: 700; color: #fff; }
+
+#instructions { font-size: 0.83rem; color: #9ca3af; line-height: 1.6; }
+
+#actions { display: flex; flex-direction: column; gap: 8px; }
+
+button {
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+
+#btn-use-boundary { background: #22c55e; color: #fff; }
+#btn-use-boundary:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+#btn-use-boundary:not(:disabled):hover { opacity: 0.85; }
+
+#btn-clear { background: #374151; color: #d1d5db; }
+#btn-clear:hover { opacity: 0.8; }
+
+#status { font-size: 0.8rem; color: #6b7280; }
+
+#map { flex: 1; height: 100%; }
