@@ -73,7 +73,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
       placed = { ...b, center_x_ft: c.x, center_y_ft: c.y, orientation_deg: deg };
 
       const foot = rectPoly(c.x, c.y, b.length_ft, b.width_ft, deg, centroid);
-      const footBuf = turf.buffer(foot, clearance / 2, { units: 'feet' });
+      const footBuf = turf.buffer(foot, clearance, { units: 'feet' });
       if (footBuf) free = turf.difference(free, footBuf) ?? free;
       break;
     }
