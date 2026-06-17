@@ -40,6 +40,8 @@ button {
 #btn-clear { background: #374151; color: #d1d5db; }
 #btn-clear:hover { opacity: 0.8; }
 
+#acreage { font-size: 1rem; font-weight: 600; color: #4ade80; }
+
 #status { font-size: 0.8rem; color: #6b7280; }
 
 #map { flex: 1; height: 100%; }
