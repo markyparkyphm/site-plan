@@ -149,6 +149,7 @@ function onSolve() {
     basinCorner:           document.getElementById('input-basin-corner').value,
     clearanceFt:           aiHints.clearanceFt ?? 30,
     orientationPreference: aiHints.orientationPreference ?? 'auto',
+    frontage:              aiHints.frontage ?? 'auto',
   };
   const reqs = {
     pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,
