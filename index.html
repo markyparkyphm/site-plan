@@ -54,9 +54,18 @@
     </div>
     <button id="btn-add-building">+ Add Building</button>
     <button id="btn-solve" disabled>Solve Layout</button>
+    <button id="btn-render" disabled>View Scale Drawing</button>
     <div id="status"></div>
   </div>
   <div id="map"></div>
+  <div id="canvas-panel" style="display:none">
+    <div id="canvas-toolbar">
+      <span id="canvas-title">Site Plan</span>
+      <button id="btn-export">Download PNG</button>
+      <button id="btn-close-canvas">✕</button>
+    </div>
+    <canvas id="render-canvas" width="900" height="650"></canvas>
+  </div>
 
   <script src="config.js"></script>
   <script>

@@ -2,6 +2,8 @@ import { initMap, clearDrawing, getMap } from './map.js';
 import { latLngToFeet, polygonAreaSqFt, sqFtToAcres, computeCentroid, feetToLatLngFromCentroid } from './projection.js';
 import { toPoly, polysOf, rectPoly } from './geometry.js';
 import { solveLayout } from './solver.js';
+import { renderLayoutOnCanvas } from './render.js';
+import { exportToPng } from './export.js';
 
 export let parcelLatLng = [];
 export let parcelFt = [];
@@ -9,6 +11,7 @@ export let centroid = null;
 
 let setbackOverlay = null;
 let solveOverlays = [];
+let lastLayout = null;
 
 export function init() {
   initMap('map', onBoundaryClosed);
@@ -17,6 +20,11 @@ export function init() {
   document.getElementById('input-setback').addEventListener('change', onSetbackChange);
   document.getElementById('btn-solve').addEventListener('click', onSolve);
   document.getElementById('btn-add-building').addEventListener('click', addBuildingRow);
+  document.getElementById('btn-render').addEventListener('click', onRender);
+  document.getElementById('btn-export').addEventListener('click', onExport);
+  document.getElementById('btn-close-canvas').addEventListener('click', () => {
+    document.getElementById('canvas-panel').style.display = 'none';
+  });
 }
 
 function addBuildingRow() {
@@ -107,7 +115,9 @@ function onSolve() {
   };
 
   const layout = solveLayout(parcelLatLng, reqs, hints);
+  lastLayout = layout;
   renderLayout(layout);
+  document.getElementById('btn-render').disabled = false;
 }
 
 function renderLayout(layout) {
@@ -177,6 +187,24 @@ function renderLayout(layout) {
 
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
   console.log('[Phase 5] layout:', layout);
+}
+
+function onRender() {
+  if (!lastLayout || !parcelFt.length) return;
+  const panel = document.getElementById('canvas-panel');
+  panel.style.display = 'flex';
+  // Read dimensions after browser lays out the panel
+  requestAnimationFrame(() => {
+    const canvas = document.getElementById('render-canvas');
+    canvas.width  = canvas.offsetWidth  || 900;
+    canvas.height = canvas.offsetHeight || 650;
+    renderLayoutOnCanvas(canvas, parcelFt, lastLayout, centroid);
+  });
+}
+
+function onExport() {
+  const canvas = document.getElementById('render-canvas');
+  exportToPng(canvas, 'site-plan.png');
 }
 
 function clearSolveOverlays() {
