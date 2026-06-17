@@ -58,22 +58,24 @@ export function reach(lenFt, widFt) {
   return Math.hypot(lenFt, widFt) / 2;
 }
 
-// Sample a grid inside a WGS84 Turf polygon; returns feet-space [{x,y}] points
+// Sample a grid inside all pieces of a WGS84 Turf geometry; returns feet-space [{x,y}] points
 export function gridPointsInside(geom, stepFt, centroid) {
   if (!geom) return [];
-  const poly = biggestPoly(geom);
-  if (!poly) return [];
+  const pieces = polysOf(geom);
+  if (pieces.length === 0) return [];
 
-  const [minLng, minLat, maxLng, maxLat] = turf.bbox(poly);
   const s = computeScaleFactors(centroid);
   const stepLat = stepFt / s.latToFt;
   const stepLng = stepFt / s.lngToFt;
 
   const pts = [];
-  for (let lng = minLng; lng <= maxLng; lng += stepLng) {
-    for (let lat = minLat; lat <= maxLat; lat += stepLat) {
-      if (turf.booleanPointInPolygon(turf.point([lng, lat]), poly)) {
-        pts.push(latLngToFeetFromCentroid({ lat, lng }, centroid));
+  for (const poly of pieces) {
+    const [minLng, minLat, maxLng, maxLat] = turf.bbox(poly);
+    for (let lng = minLng; lng <= maxLng; lng += stepLng) {
+      for (let lat = minLat; lat <= maxLat; lat += stepLat) {
+        if (turf.booleanPointInPolygon(turf.point([lng, lat]), poly)) {
+          pts.push(latLngToFeetFromCentroid({ lat, lng }, centroid));
+        }
       }
     }
   }

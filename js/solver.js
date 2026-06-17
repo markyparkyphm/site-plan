@@ -1,5 +1,5 @@
 import { toPoly, biggestPoly, rectPoly, reach, gridPointsInside } from './geometry.js';
-import { computeCentroid, latLngToFeetFromCentroid } from './projection.js';
+import { computeCentroid, latLngToFeetFromCentroid, computeScaleFactors } from './projection.js';
 
 // Entry point — called by main.js after boundary + reqs are set
 export function solveLayout(parcelLatLng, reqs, hints) {
@@ -18,6 +18,11 @@ export function solveLayout(parcelLatLng, reqs, hints) {
   const basin = growCornerClip(buildable, hints.basinCorner ?? 'SW', targetSqFt, centroid);
   if (!basin) {
     warnings.push('Could not fit detention basin at target size.');
+  } else {
+    const basinAreaSqFt = turf.area(basin) * 10.7639;
+    if (basinAreaSqFt < targetSqFt * 0.9) {
+      warnings.push(`Basin undersized: got ${Math.round(basinAreaSqFt).toLocaleString()} sq ft, target ${Math.round(targetSqFt).toLocaleString()} sq ft.`);
+    }
   }
 
   let free = buildable;
@@ -67,7 +72,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
       if (cands.length === 0) continue;
 
       const target = zoneCentroid(parcelLatLng, i, N, centroid);
-      cands.sort((a, b) => dist2(a, target) - dist2(b, target));
+      cands.sort((a, b) => dist2(a, target) - dist2(b, target) || a.y - b.y || a.x - b.x);
 
       const c = cands[0];
       placed = { ...b, center_x_ft: c.x, center_y_ft: c.y, orientation_deg: deg };
@@ -135,7 +140,7 @@ function placeAlongSouthEdge(free, parkingSqFt, centroid) {
   const biggest = biggestPoly(free);
   if (!biggest) return null;
 
-  const s = computeScaleApprox(centroid);
+  const s = computeScaleFactors(centroid);
   const [minLng, minLat, maxLng] = turf.bbox(biggest);
 
   // Fixed 60 ft depth (2 rows + aisle); compute width needed
@@ -171,7 +176,7 @@ function makeDriveways(parcel, parking, count, centroid) {
   const [pMinLng, pMinLat, pMaxLng] = turf.bbox(parking);
   const [,  parMinLat] = turf.bbox(parcel);
   const driveways = [];
-  const drivewayWidthDeg = 24 / computeScaleApprox(centroid).lngToFt;
+  const drivewayWidthDeg = 24 / computeScaleFactors(centroid).lngToFt;
 
   for (let i = 0; i < count; i++) {
     const offset = (i + 1) / (count + 1);
@@ -194,27 +199,21 @@ function preferredOrientations(pref) {
 
 function zoneCentroid(parcelLatLng, i, N, centroid) {
   if (N <= 1) return { x: 0, y: 0 };
+  const s = computeScaleFactors(centroid);
   const lngs = parcelLatLng.map(p => p.lng);
   const lats = parcelLatLng.map(p => p.lat);
   const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
   const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const widthFt  = (maxLng - minLng) * s.lngToFt;
+  const heightFt = (maxLat - minLat) * s.latToFt;
   const t = (i + 0.5) / N;
-  const lng = minLng + t * (maxLng - minLng);
-  const lat = (minLat + maxLat) / 2;
+  const lng = widthFt >= heightFt ? minLng + t * (maxLng - minLng) : (minLng + maxLng) / 2;
+  const lat = widthFt >= heightFt ? (minLat + maxLat) / 2 : minLat + t * (maxLat - minLat);
   return latLngToFeetFromCentroid({ lat, lng }, centroid);
 }
 
 function dist2(a, b) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-}
-
-function computeScaleApprox(centroid) {
-  const METERS_PER_DEGREE_LAT = 111320;
-  const FEET_PER_METER = 3.28084;
-  return {
-    latToFt: METERS_PER_DEGREE_LAT * FEET_PER_METER,
-    lngToFt: METERS_PER_DEGREE_LAT * Math.cos(centroid.lat * Math.PI / 180) * FEET_PER_METER,
-  };
 }
 
 function infeasible(reason) {
