@@ -1,17 +1,21 @@
 import { initMap, clearDrawing, getMap } from './map.js';
 import { latLngToFeet, polygonAreaSqFt, sqFtToAcres, computeCentroid } from './projection.js';
 import { toPoly, polysOf } from './geometry.js';
+import { solveLayout } from './solver.js';
 
 export let parcelLatLng = [];
 export let parcelFt = [];
 export let centroid = null;
+
 let setbackOverlay = null;
+let solveOverlays = [];
 
 export function init() {
   initMap('map', onBoundaryClosed);
   document.getElementById('btn-use-boundary').addEventListener('click', onUseBoundary);
   document.getElementById('btn-clear').addEventListener('click', onClear);
   document.getElementById('input-setback').addEventListener('change', onSetbackChange);
+  document.getElementById('btn-solve').addEventListener('click', onSolve);
 }
 
 function onBoundaryClosed(pts) {
@@ -29,7 +33,8 @@ function onBoundaryClosed(pts) {
 }
 
 function onUseBoundary() {
-  document.getElementById('status').textContent = 'Boundary confirmed. Ready for Phase 2.';
+  document.getElementById('btn-solve').disabled = false;
+  document.getElementById('status').textContent = 'Boundary confirmed. Click "Solve Basin" to place the pond.';
 }
 
 function onSetbackChange() {
@@ -43,18 +48,14 @@ function drawSetback() {
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }
 
   const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
-
-  // Use WGS84 lat/lng polygon so turf.buffer works correctly
   const parcelPoly = toPoly(parcelLatLng);
   const buildable = turf.buffer(parcelPoly, -setbackFt, { units: 'feet' });
 
   if (!buildable) {
-    document.getElementById('status').textContent =
-      'Setback too large — nothing buildable remains.';
+    document.getElementById('status').textContent = 'Setback too large — nothing buildable remains.';
     return;
   }
 
-  // Extract WGS84 [lng,lat] coordinates and convert to Google Maps {lat,lng} paths
   const paths = polysOf(buildable).map(poly =>
     poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng }))
   );
@@ -74,12 +75,68 @@ function drawSetback() {
     `Setback: ${setbackFt} ft  |  Buildable: ${buildableAcres.toFixed(2)} ac`;
 }
 
+function onSolve() {
+  clearSolveOverlays();
+  document.getElementById('status').textContent = 'Solving…';
+
+  const hints = {
+    setbackFt: parseFloat(document.getElementById('input-setback').value) || 20,
+    basinCorner: document.getElementById('input-basin-corner').value,
+    clearanceFt: 30,
+  };
+
+  const reqs = {
+    pondPct: parseFloat(document.getElementById('input-pond-pct').value) || 15,
+    buildings: [],
+    parking_stalls: 0,
+    driveways: 0,
+  };
+
+  const layout = solveLayout(parcelLatLng, reqs, hints);
+  renderLayout(layout);
+}
+
+function renderLayout(layout) {
+  const map = getMap();
+
+  // Basin — blue-green fill
+  if (layout.detention_pond) {
+    const polys = polysOf(layout.detention_pond);
+    polys.forEach(poly => {
+      const paths = poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng }));
+      solveOverlays.push(new google.maps.Polygon({
+        paths, map,
+        strokeColor: '#06b6d4', strokeWeight: 2,
+        fillColor: '#06b6d4', fillOpacity: 0.35,
+      }));
+    });
+  }
+
+  const basinAcres = layout.detention_pond
+    ? (turf.area(layout.detention_pond) * 10.7639 / 43560).toFixed(2)
+    : '—';
+
+  const msg = layout.rationale === 'All elements placed successfully.'
+    ? `Basin: ${basinAcres} ac`
+    : layout.rationale;
+
+  document.getElementById('status').textContent = msg;
+  if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
+}
+
+function clearSolveOverlays() {
+  solveOverlays.forEach(o => o.setMap(null));
+  solveOverlays = [];
+}
+
 function onClear() {
   parcelLatLng = [];
   parcelFt = [];
   centroid = null;
+  clearSolveOverlays();
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }
   document.getElementById('btn-use-boundary').disabled = true;
+  document.getElementById('btn-solve').disabled = true;
   document.getElementById('acreage').textContent = '';
   document.getElementById('status').textContent = '';
   clearDrawing();

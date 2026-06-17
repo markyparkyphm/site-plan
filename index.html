@@ -23,6 +23,20 @@
       Setback (ft)
       <input id="input-setback" type="number" value="20" min="0" max="500">
     </label>
+    <label class="sidebar-label">
+      Basin (% of parcel)
+      <input id="input-pond-pct" type="number" value="15" min="1" max="50">
+    </label>
+    <label class="sidebar-label">
+      Basin corner
+      <select id="input-basin-corner">
+        <option value="SW">SW</option>
+        <option value="SE">SE</option>
+        <option value="NW">NW</option>
+        <option value="NE">NE</option>
+      </select>
+    </label>
+    <button id="btn-solve" disabled>Solve Basin</button>
     <div id="status"></div>
   </div>
   <div id="map"></div>

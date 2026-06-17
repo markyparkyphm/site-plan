@@ -50,7 +50,8 @@ button {
   color: #9ca3af;
 }
 
-.sidebar-label input {
+.sidebar-label input,
+.sidebar-label select {
   background: #1f2937;
   border: 1px solid #374151;
   border-radius: 4px;
@@ -59,6 +60,10 @@ button {
   font-size: 0.9rem;
   width: 100%;
 }
+
+#btn-solve { background: #7c3aed; color: #fff; }
+#btn-solve:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+#btn-solve:not(:disabled):hover { opacity: 0.85; }
 
 #status { font-size: 0.8rem; color: #6b7280; }
 
