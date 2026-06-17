@@ -1,5 +1,5 @@
-import { toPoly, polysOf, biggestPoly, rectPoly, reach, gridPointsInside } from './geometry.js';
-import { computeCentroid, feetToLatLngFromCentroid, latLngToFeetFromCentroid } from './projection.js';
+import { toPoly, biggestPoly, rectPoly, reach, gridPointsInside } from './geometry.js';
+import { computeCentroid, latLngToFeetFromCentroid } from './projection.js';
 
 // Entry point — called by main.js after boundary + reqs are set
 export function solveLayout(parcelLatLng, reqs, hints) {
@@ -130,21 +130,27 @@ function growCornerClip(buildable, corner, targetSqFt, centroid) {
   return best;
 }
 
-// Place a rectangle of parkingSqFt against the south (min-lat) edge of free
+// Place a parking rectangle against the south edge of free using fixed 60 ft depth
 function placeAlongSouthEdge(free, parkingSqFt, centroid) {
   const biggest = biggestPoly(free);
   if (!biggest) return null;
 
-  const [minLng, minLat, maxLng, maxLat] = turf.bbox(biggest);
-  const widthDeg = maxLng - minLng;
-  const heightNeeded = parkingSqFt / (widthDeg * computeScaleApprox(centroid).lngToFt * widthDeg);
+  const s = computeScaleApprox(centroid);
+  const [minLng, minLat, maxLng] = turf.bbox(biggest);
 
-  // Simpler: compute in feet
-  const widthFt = widthDeg * computeScaleApprox(centroid).lngToFt;
-  const heightFt = parkingSqFt / widthFt;
-  const heightDeg = heightFt / computeScaleApprox(centroid).latToFt;
+  // Fixed 60 ft depth (2 rows + aisle); compute width needed
+  const depthFt = 60;
+  const depthDeg = depthFt / s.latToFt;
+  const widthFt = parkingSqFt / depthFt;
+  const widthDeg = widthFt / s.lngToFt;
 
-  const parkingPoly = turf.bboxPolygon([minLng, minLat, maxLng, minLat + heightDeg]);
+  // Center the parking rectangle along the south edge
+  const centerLng = (minLng + maxLng) / 2;
+  const parkingPoly = turf.bboxPolygon([
+    centerLng - widthDeg / 2, minLat,
+    centerLng + widthDeg / 2, minLat + depthDeg,
+  ]);
+
   const clipped = turf.intersect(biggest, parkingPoly);
 
   const actualSqFt = clipped ? turf.area(clipped) * 10.7639 : 0;
@@ -162,8 +168,8 @@ function placeAlongSouthEdge(free, parkingSqFt, centroid) {
 }
 
 function makeDriveways(parcel, parking, count, centroid) {
-  const [pMinLng, pMinLat, pMaxLng, pMaxLat] = turf.bbox(parking);
-  const [parMinLng, parMinLat, parMaxLng, parMaxLat] = turf.bbox(parcel);
+  const [pMinLng, pMinLat, pMaxLng] = turf.bbox(parking);
+  const [,  parMinLat] = turf.bbox(parcel);
   const driveways = [];
   const drivewayWidthDeg = 24 / computeScaleApprox(centroid).lngToFt;
 

@@ -88,8 +88,8 @@ function onSolve() {
   const reqs = {
     pondPct: parseFloat(document.getElementById('input-pond-pct').value) || 15,
     buildings: [],
-    parking_stalls: 0,
-    driveways: 0,
+    parking_stalls: parseInt(document.getElementById('input-parking').value) || 0,
+    driveways: parseInt(document.getElementById('input-driveways').value) || 0,
   };
 
   const layout = solveLayout(parcelLatLng, reqs, hints);
@@ -99,28 +99,51 @@ function onSolve() {
 function renderLayout(layout) {
   const map = getMap();
 
-  // Basin — blue-green fill
+  // Basin — blue-green
   if (layout.detention_pond) {
-    const polys = polysOf(layout.detention_pond);
-    polys.forEach(poly => {
-      const paths = poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng }));
+    polysOf(layout.detention_pond).forEach(poly => {
       solveOverlays.push(new google.maps.Polygon({
-        paths, map,
+        paths: poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng })),
+        map,
         strokeColor: '#06b6d4', strokeWeight: 2,
         fillColor: '#06b6d4', fillOpacity: 0.35,
       }));
     });
   }
 
+  // Parking — yellow
+  layout.parking_areas.forEach(p => {
+    polysOf(p).forEach(poly => {
+      solveOverlays.push(new google.maps.Polygon({
+        paths: poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng })),
+        map,
+        strokeColor: '#fbbf24', strokeWeight: 2,
+        fillColor: '#fbbf24', fillOpacity: 0.35,
+      }));
+    });
+  });
+
+  // Driveways — orange
+  layout.driveways.forEach(d => {
+    polysOf(d).forEach(poly => {
+      solveOverlays.push(new google.maps.Polygon({
+        paths: poly.geometry.coordinates[0].map(([lng, lat]) => ({ lat, lng })),
+        map,
+        strokeColor: '#f97316', strokeWeight: 2,
+        fillColor: '#f97316', fillOpacity: 0.35,
+      }));
+    });
+  });
+
   const basinAcres = layout.detention_pond
-    ? (turf.area(layout.detention_pond) * 10.7639 / 43560).toFixed(2)
+    ? (turf.area(layout.detention_pond) * 10.7639 / 43560).toFixed(2) + ' ac'
     : '—';
+  const stallCount = layout.parking_areas[0]?.properties?.stall_count ?? 0;
 
-  const msg = layout.rationale === 'All elements placed successfully.'
-    ? `Basin: ${basinAcres} ac`
-    : layout.rationale;
+  const summary = `Basin: ${basinAcres}  |  Parking: ${stallCount} stalls  |  Driveways: ${layout.driveways.length}`;
+  document.getElementById('status').textContent =
+    layout.warnings.length ? layout.rationale : summary;
 
-  document.getElementById('status').textContent = msg;
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
 }
 
