@@ -274,11 +274,11 @@ function onRender() {
   const panel = document.getElementById('canvas-panel');
   panel.style.display = 'flex';
   // Read dimensions after browser lays out the panel
-  requestAnimationFrame(() => {
+  requestAnimationFrame(async () => {
     const canvas = document.getElementById('render-canvas');
     canvas.width  = canvas.offsetWidth  || 900;
     canvas.height = canvas.offsetHeight || 650;
-    renderLayoutOnCanvas(canvas, parcelFt, lastLayout, centroid);
+    await renderLayoutOnCanvas(canvas, parcelLatLng, lastLayout, centroid);
   });
 }
 
