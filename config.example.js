@@ -1,2 +1,2 @@
-export const GOOGLE_MAPS_KEY = "";
-export const GEMINI_KEY = "";
+window.GEMINI_API_KEY = '';
+window.MAPS_API_KEY   = '';
