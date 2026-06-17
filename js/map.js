@@ -87,6 +87,8 @@ function _closePolygon() {
   if (onClosedCb) onClosedCb([...points]);
 }
 
+export function getMap() { return map; }
+
 export function clearDrawing() {
   drawing = false;
   if (mapClickListener) {

@@ -53,9 +53,22 @@
       </div>
     </div>
     <button id="btn-add-building">+ Add Building</button>
+    <div class="sidebar-section-title">AI Hints</div>
+    <textarea id="input-ai" rows="3" placeholder='e.g. "put basin NE, 25 ft setback, orient buildings N-S"'></textarea>
+    <button id="btn-ai-apply">Apply AI Hints</button>
+    <div id="ai-status"></div>
     <button id="btn-solve" disabled>Solve Layout</button>
     <button id="btn-render" disabled>View Scale Drawing</button>
     <div id="status"></div>
+    <div id="stats-panel" style="display:none">
+      <div class="sidebar-section-title">Results</div>
+      <div class="stat-row"><span class="stat-label">Parcel</span><span id="stat-parcel"></span></div>
+      <div class="stat-row"><span class="stat-label">Buildings</span><span id="stat-buildings"></span></div>
+      <div class="stat-row"><span class="stat-label">Footprint</span><span id="stat-footprint"></span></div>
+      <div class="stat-row"><span class="stat-label">Basin</span><span id="stat-basin"></span></div>
+      <div class="stat-row"><span class="stat-label">Parking</span><span id="stat-parking"></span></div>
+    </div>
+    <div id="warnings-panel"></div>
   </div>
   <div id="map"></div>
   <div id="canvas-panel" style="display:none">

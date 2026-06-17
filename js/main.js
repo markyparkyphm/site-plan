@@ -4,6 +4,7 @@ import { toPoly, polysOf, rectPoly } from './geometry.js';
 import { solveLayout } from './solver.js';
 import { renderLayoutOnCanvas } from './render.js';
 import { exportToPng } from './export.js';
+import { parseInstructions } from './ai.js';
 
 export let parcelLatLng = [];
 export let parcelFt = [];
@@ -12,6 +13,7 @@ export let centroid = null;
 let setbackOverlay = null;
 let solveOverlays = [];
 let lastLayout = null;
+let aiHints = {};
 
 export function init() {
   initMap('map', onBoundaryClosed);
@@ -25,6 +27,7 @@ export function init() {
   document.getElementById('btn-close-canvas').addEventListener('click', () => {
     document.getElementById('canvas-panel').style.display = 'none';
   });
+  document.getElementById('btn-ai-apply').addEventListener('click', onApplyAI);
 }
 
 function addBuildingRow() {
@@ -98,14 +101,54 @@ function drawSetback() {
     `Setback: ${setbackFt} ft  |  Buildable: ${buildableAcres.toFixed(2)} ac`;
 }
 
+async function onApplyAI() {
+  const text = document.getElementById('input-ai').value.trim();
+  if (!text) return;
+
+  const statusEl = document.getElementById('ai-status');
+  const btn = document.getElementById('btn-ai-apply');
+  btn.disabled = true;
+  statusEl.textContent = 'Thinking…';
+
+  try {
+    const hints = await parseInstructions(text);
+
+    if (Object.keys(hints).length === 0) {
+      statusEl.textContent = 'No recognised hints — try rephrasing.';
+      return;
+    }
+
+    aiHints = { ...aiHints, ...hints };
+
+    // Reflect changes back into visible UI controls
+    if (hints.setbackFt !== undefined) {
+      document.getElementById('input-setback').value = hints.setbackFt;
+      if (parcelLatLng.length > 0) drawSetback();
+    }
+    if (hints.basinCorner !== undefined) {
+      document.getElementById('input-basin-corner').value = hints.basinCorner;
+    }
+
+    const summary = Object.entries(hints).map(([k, v]) => `${k}: ${v}`).join(', ');
+    statusEl.textContent = `Applied — ${summary}`;
+
+    if (!document.getElementById('btn-solve').disabled) onSolve();
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function onSolve() {
   clearSolveOverlays();
   document.getElementById('status').textContent = 'Solving…';
 
   const hints = {
-    setbackFt:   parseFloat(document.getElementById('input-setback').value) || 20,
-    basinCorner: document.getElementById('input-basin-corner').value,
-    clearanceFt: 30,
+    setbackFt:             parseFloat(document.getElementById('input-setback').value) || 20,
+    basinCorner:           document.getElementById('input-basin-corner').value,
+    clearanceFt:           aiHints.clearanceFt ?? 30,
+    orientationPreference: aiHints.orientationPreference ?? 'auto',
   };
   const reqs = {
     pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,
@@ -115,12 +158,18 @@ function onSolve() {
   };
 
   const layout = solveLayout(parcelLatLng, reqs, hints);
+
+  // Determinism self-check
+  const layout2 = solveLayout(parcelLatLng, reqs, hints);
+  const isDeterministic = JSON.stringify(layout.buildings) === JSON.stringify(layout2.buildings)
+    && JSON.stringify(layout.detention_pond) === JSON.stringify(layout2.detention_pond);
+
   lastLayout = layout;
-  renderLayout(layout);
+  renderLayout(layout, reqs, isDeterministic);
   document.getElementById('btn-render').disabled = false;
 }
 
-function renderLayout(layout) {
+function renderLayout(layout, reqs, isDeterministic) {
   const map = getMap();
 
   // Basin — blue-green
@@ -177,16 +226,47 @@ function renderLayout(layout) {
     }));
   });
 
-  const basinAcres = layout.detention_pond
-    ? (turf.area(layout.detention_pond) * 10.7639 / 43560).toFixed(2) + ' ac' : '—';
+  // Stats
+  const parcelSqFt = polygonAreaSqFt(parcelFt);
+  const parcelAcres = sqFtToAcres(parcelSqFt);
+  const footprintSqFt = layout.buildings.reduce((s, b) => s + b.length_ft * b.width_ft, 0);
+  const basinSqFt = layout.detention_pond ? turf.area(layout.detention_pond) * 10.7639 : 0;
+  const basinAcres = basinSqFt > 0 ? sqFtToAcres(basinSqFt) : null;
   const stallCount = layout.parking_areas[0]?.properties?.stall_count ?? 0;
 
-  document.getElementById('status').textContent = layout.warnings.length
-    ? layout.rationale
-    : `Basin: ${basinAcres}  |  Parking: ${stallCount} stalls  |  Buildings: ${layout.buildings.length}`;
+  document.getElementById('stat-parcel').textContent = `${parcelAcres.toFixed(2)} ac`;
+  document.getElementById('stat-buildings').textContent =
+    `${layout.buildings.length} / ${reqs.buildings.length}`;
+  document.getElementById('stat-footprint').textContent = footprintSqFt > 0
+    ? `${footprintSqFt.toLocaleString()} sq ft (${(footprintSqFt / parcelSqFt * 100).toFixed(1)}%)`
+    : '—';
+  document.getElementById('stat-basin').textContent = basinAcres
+    ? `${basinAcres.toFixed(2)} ac (${(basinSqFt / parcelSqFt * 100).toFixed(1)}%)`
+    : '—';
+  document.getElementById('stat-parking').textContent = `${stallCount} stalls`;
+  document.getElementById('stats-panel').style.display = 'flex';
+
+  // Warnings
+  const warningsEl = document.getElementById('warnings-panel');
+  warningsEl.innerHTML = '';
+
+  if (!isDeterministic) {
+    const d = document.createElement('div');
+    d.className = 'error-msg';
+    d.textContent = '⚠ Solver produced different results on two runs — layout may not be stable.';
+    warningsEl.appendChild(d);
+  }
+
+  layout.warnings.forEach(w => {
+    const el = document.createElement('div');
+    el.className = 'warning-msg';
+    el.textContent = `⚠ ${w}`;
+    warningsEl.appendChild(el);
+  });
+
+  document.getElementById('status').textContent = layout.warnings.length ? '' : 'Layout solved successfully.';
 
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
-  console.log('[Phase 5] layout:', layout);
 }
 
 function onRender() {
@@ -214,11 +294,15 @@ function clearSolveOverlays() {
 
 function onClear() {
   parcelLatLng = []; parcelFt = []; centroid = null;
+  aiHints = {};
   clearSolveOverlays();
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }
   document.getElementById('btn-use-boundary').disabled = true;
   document.getElementById('btn-solve').disabled = true;
   document.getElementById('acreage').textContent = '';
   document.getElementById('status').textContent = '';
+  document.getElementById('ai-status').textContent = '';
+  document.getElementById('stats-panel').style.display = 'none';
+  document.getElementById('warnings-panel').innerHTML = '';
   clearDrawing();
 }
