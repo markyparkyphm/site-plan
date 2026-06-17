@@ -128,6 +128,9 @@ async function onApplyAI() {
     if (hints.basinCorner !== undefined) {
       document.getElementById('input-basin-corner').value = hints.basinCorner;
     }
+    if (hints.frontage !== undefined) {
+      document.getElementById('input-frontage').value = hints.frontage;
+    }
 
     const summary = Object.entries(hints).map(([k, v]) => `${k}: ${v}`).join(', ');
     statusEl.textContent = `Applied — ${summary}`;
@@ -149,7 +152,7 @@ function onSolve() {
     basinCorner:           document.getElementById('input-basin-corner').value,
     clearanceFt:           aiHints.clearanceFt ?? 30,
     orientationPreference: aiHints.orientationPreference ?? 'auto',
-    frontage:              aiHints.frontage ?? 'auto',
+    frontage:              document.getElementById('input-frontage').value,
   };
   const reqs = {
     pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,

@@ -9,7 +9,7 @@ satellite imagery background and exports as PNG.
 
 ---
 
-## Current status: all Phases + post-review fixes complete. Frontage UI (Step 4) pending.
+## Current status: all Phases + post-review fixes + Frontage task COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -30,18 +30,19 @@ satellite imagery background and exports as PNG.
 | P2 | Building clearance: `clearance/2` → `clearance` (was getting ~15 ft gap, now ~30 ft) | 442ddce |
 | P3 | gridPointsInside samples all poly pieces; zoneCentroid spreads along long axis; basin undersized warning; determinism tie-break; removed duplicate computeScaleFactors | 11658a4 |
 
-### Frontage task (FRONTAGE_TASK.md)
+### Frontage task (FRONTAGE_TASK.md — all done)
 | Step | What | Status | Commit |
 |------|------|--------|--------|
 | 1 | Generalize parking placement: `placeAlongFrontageEdge(free, sqFt, centroid, frontage)` | ✅ | 165e183 |
 | 2 | Generalize driveways for all 4 directions | ✅ | 165e183 |
 | 3 | Basin default corner derived from frontage (S→NE, N→SW, W→SE, E→NW) | ✅ | 165e183 |
-| 4 | **UI dropdown for Road Frontage in index.html + main.js read** | ❌ NOT DONE | — |
+| 4 | UI dropdown for Road Frontage in index.html + main.js read | ✅ | this session |
 | 5a | ai.js: add `frontage` field to Gemini prompt + VALID_FRONTAGE allowlist | ✅ | 165e183 |
 | 5b | main.js: wire `aiHints.frontage` into `onSolve` hints | ✅ | 96d9b13 |
-| 5c | main.js `onApplyAI`: reflect parsed frontage back into `#input-frontage` element | ❌ NOT DONE (needs Step 4 UI element first) | — |
+| 5c | main.js `onApplyAI`: reflect parsed frontage back into `#input-frontage` element | ✅ | this session |
 | — | Fix: E/W driveway bbox-anchor bug on slanted parcels | ✅ | 781f786 |
 | — | Fix: E/W parking multi-lat edge sampling (`sampleEdgeLng`) | ✅ | 35eafbe |
+| — | Fix: S/N parking stall loss on slanted/tilted parcels (`sampleEdgeLat` + scan) | ✅ | this session |
 
 ---
 
@@ -49,15 +50,14 @@ satellite imagery background and exports as PNG.
 
 ```
 index.html          UI shell — loads Maps API, has sidebar controls
-                    MISSING: Road frontage <select> (Step 4 of FRONTAGE_TASK.md)
+                    Has Road frontage <select id="input-frontage"> after basin-corner
 styles.css          Dark sidebar + map + canvas panel layout
 config.js           API keys — GITIGNORED, never commit
 config.example.js   Safe shape reference
 js/
   main.js           App state + wires UI events → solver → renderer
-                    aiHints accumulates AI-parsed fields; onSolve reads them all into hints
-                    MISSING: read #input-frontage into hints.frontage (Step 4)
-                    MISSING: onApplyAI reflect hints.frontage → #input-frontage (Step 5c)
+                    onSolve reads hints.frontage from #input-frontage dropdown
+                    onApplyAI reflects AI-parsed frontage back into #input-frontage
   map.js            Google Maps init, click-to-draw polygon sketching
   projection.js     computeCentroid, computeScaleFactors, latLngToFeetFromCentroid,
                     feetToLatLngFromCentroid, latLngToFeet, polygonAreaSqFt
@@ -65,7 +65,8 @@ js/
                     gridPointsInside now samples ALL polysOf(geom), not just biggestPoly
   solver.js         solveLayout(parcelLatLng, reqs, hints) — the geometry engine
                     resolveFrontage, placeAlongFrontageEdge, makeDriveways (all 4 dirs),
-                    sampleEdgeLng (multi-lat edge sampling for E/W parking)
+                    sampleEdgeLng (multi-lat edge sampling for E/W parking boundary),
+                    sampleEdgeLat (multi-lng edge sampling for S/N parking boundary)
   render.js         async renderLayoutOnCanvas(canvas, parcelLatLng, layout, centroid)
                     Web Mercator projection, satellite background, Mercator scale bar
   export.js         exportToPng() — downloads canvas as PNG
@@ -83,6 +84,8 @@ centroid      // {lat, lng}     parcel centroid, reference for all conversions
 lastLayout    // solver output, used by renderer and export
 aiHints       // accumulated hints from AI (merged on each Apply AI Hints click)
               // keys: setbackFt, clearanceFt, basinCorner, orientationPreference, frontage
+              // NOTE: aiHints.frontage is no longer read directly in onSolve —
+              // onApplyAI writes it into the #input-frontage dropdown instead.
 ```
 
 ---
@@ -128,27 +131,163 @@ hints = {
 
 **Basin default corner** (Step 3): when `hints.basinCorner` is undefined, the solver
 derives the default from frontage: `S→NE, N→SW, W→SE, E→NW` (opposite the road).
-**IMPORTANT**: the UI basin-corner `<select>` always sends an explicit value, so this
-default only fires when `basinCorner` is absent from hints — i.e. for AI-only flows
-or programmatic calls. Step 4 should either add 'auto' to basin corner select, or
-not send basinCorner when frontage is explicitly set.
+**IMPORTANT**: the UI basin-corner `<select>` always sends an explicit value (SW/SE/NW/NE),
+so this default only fires when `basinCorner` is absent from hints — i.e. AI-only flows
+or programmatic calls where basinCorner is omitted.
 
-**Parking** (`placeAlongFrontageEdge`): 60 ft deep, `parkingSqFt/60` ft wide.
-- S/N: depth in lat, width in lng, orientation=0
-- E/W: depth in lng, width in lat, orientation=90
-- E/W uses `sampleEdgeLng()`: samples the free-space boundary at 7 latitudes across
-  the full parking height and anchors to the most-constrained point. This prevents the
-  parking rectangle from extending past a slanted boundary and losing stalls.
+---
 
-**Driveways** (`makeDriveways`): 24 ft wide access strip from parcel boundary to parking.
-- S/N: bbox strip approach (works for horizontal edges)
-- E/W: slices the parcel and parking at the driveway's lat strip, reads `pkBbox[2/0]`
-  (parking east/west at that specific lat) as the inner boundary, then clips the parcel
-  cross-section to the road-facing half. This correctly follows slanted boundaries.
+## Parking placement — full algorithm (`placeAlongFrontageEdge`)
 
-**Current limitation on very slanted E/W parcels**: parking is pushed inward so it
-doesn't get clipped, so it won't touch the parcel's extreme corner. The driveway fills
-the gap between parking and parcel edge. Stall count should be close to the target.
+All four directions place a 60 ft deep parking block against the frontage edge of
+`biggestPoly(free)`. The hard problem is placing an **axis-aligned rectangle** against
+a parcel boundary that may be **slanted or tilted** — the rectangle will be clipped
+by the boundary, losing stalls. The solution in each direction is to find the
+most-constrained boundary position first, then size and anchor the rectangle to fit
+without clipping.
+
+### S and N frontage (added this session — replaces broken bbox approach)
+
+**Root cause of the bug:** The original code computed the parking width from
+`parkingSqFt / depthFt` and centered it at `(minLng + maxLng) / 2` of the free-space
+bbox. Then it intersected the rectangle with `biggestPoly(free)`. Two failure modes:
+
+1. **Basin cuts into the south band**: The basin might be in the SE corner and extend
+   into the 60 ft south band. The bbox center is still in the middle of the parcel,
+   so the right half of the parking rectangle falls inside the basin area and gets
+   clipped on intersection → fewer stalls.
+
+2. **Tilted/rotated parcel**: For a parcel rotated (e.g.) 30°, `minLat` is the
+   **absolute bottom corner tip** — a single point with zero horizontal width. Any
+   approach that samples the free space near `minLat` (including the intermediate
+   attempts using "mid-depth" at `minLat + 30ft`) still falls within the needle-thin
+   sliver near the corner. This caused parking to collapse to near-zero width (9 stalls
+   instead of 50 on a 61-acre parcel).
+
+**The fix (two-phase):**
+
+**Phase 1 — find where the frontage actually is:**
+Scan in 30 steps across the south half of the free space's lat range (north half for N
+frontage), sampling a thin horizontal band at each step. Stop at the **first (southernmost)
+lat where the cross-section is wide enough** to fit the needed parking width. This
+correctly skips the zero-width corner tip of a tilted parcel and finds the actual
+viable frontage latitude. If no single lat has enough width (very narrow parcel), fall
+back to the **widest lat seen** so stalls are maximized.
+
+```javascript
+// S frontage — scans from minLat upward through 50% of parcel height
+for (let i = 0; i <= 30; i++) {
+  const lat = minLat + (i / 30) * (maxLat - minLat) * 0.5;
+  // ... intersect thin band with biggest, measure width ...
+  if (w > bestWidth) { record widest (fallback) }
+  if (w >= neededWidthDeg) { record this lat and break }  // southernmost viable
+}
+```
+
+**Phase 2 — pin to the actual slanted boundary:**
+Given the centerLng and halfW determined in Phase 1, call `sampleEdgeLat` to find
+the actual south (or north) boundary lat at each longitude within the parking width.
+For a slanted boundary, the south edge is at a **different latitude at each longitude**.
+Taking the **maximum** (northernmost) south boundary lat across all samples ensures the
+parking rectangle's bottom edge sits at or above the boundary everywhere — no clipping.
+
+```javascript
+const anchorLat = sampleEdgeLat(biggest, 'S', centerLng, halfW, minLat, maxLat, s);
+parkingPoly = [centerLng - halfW, anchorLat, centerLng + halfW, anchorLat + depthDeg];
+```
+
+On a slanted parcel, `anchorLat` will be the south boundary at the east end of the
+parking (the highest point). The west side has a gap between the parking's south edge
+and the parcel boundary; the driveway fills this gap.
+
+For N frontage the logic is symmetric: scan downward from `maxLat`, find northernmost
+viable lat, anchor the parking's **north** edge using `sampleEdgeLat('N')` which returns
+the **southernmost** north boundary across the parking width.
+
+### E and W frontage (unchanged, already working)
+
+Depth is 60 ft in the lng direction; height (`parkingSqFt / 60` ft) runs in the lat
+direction, centered at `(minLat + maxLat) / 2`. `sampleEdgeLng` samples the E or W
+boundary at 7 latitudes across the parking height and takes the **most constrained** point:
+- W frontage: `max` of all west boundary lngs (rightmost = most inward point)
+- E frontage: `min` of all east boundary lngs (leftmost = most inward point)
+
+The rectangle is anchored to that constrained point and extends inward by `depthDeg`.
+This prevents clipping on slanted E/W boundaries.
+
+### Summary of helper functions in solver.js
+
+```
+sampleEdgeLng(poly, side, centerLat, halfWidthDeg, minLng, maxLng, s)
+  → finds most-constrained E or W boundary lng across the parking HEIGHT
+  → used by E/W frontage cases
+
+sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s)
+  → finds most-constrained S or N boundary lat across the parking WIDTH
+  → used by S/N frontage cases (added this session)
+  → 'S': returns northernmost (highest) south edge lat
+  → 'N': returns southernmost (lowest) north edge lat
+```
+
+Both functions use `biggestPoly(slice)` at each sample point so they correctly ignore
+the smaller piece when a basin or difference operation has split the free space.
+
+---
+
+## Driveways (`makeDriveways`)
+
+24 ft wide access strip from parcel boundary to parking south/north/east/west edge.
+
+**S/N frontage**: simple horizontal bbox strip between `parMinLat`/`parMaxLat` and
+`pMinLat`/`pMaxLat` (parking south/north edge), intersected with the parcel to clip
+to actual boundary. Strips distributed evenly across the parking width at
+`(i+1)/(count+1)` spacing.
+
+**E/W frontage**: for each driveway strip, the lat strip is intersected with both the
+parcel AND the parking at that specific lat. The parking cross-section's `pkBbox[2/0]`
+(east/west extent at that lat, not the parking bbox) is used as the inner boundary.
+Then the parcel cross-section is clipped to the road-facing half. This correctly
+follows slanted parcel boundaries — the old bbox-anchor approach produced driveways
+that extended outside the parcel on slanted E/W parcels.
+
+---
+
+## Road Frontage UI (added this session)
+
+### index.html change
+A new `<select id="input-frontage">` was added to the sidebar immediately after the
+basin-corner select:
+```html
+<label class="sidebar-label">
+  Road frontage
+  <select id="input-frontage">
+    <option value="auto">Auto</option>
+    <option value="S">South</option>
+    <option value="N">North</option>
+    <option value="E">East</option>
+    <option value="W">West</option>
+  </select>
+</label>
+```
+
+### main.js changes
+
+**`onSolve`**: `hints.frontage` now reads directly from the dropdown:
+```javascript
+frontage: document.getElementById('input-frontage').value,
+```
+The previous `aiHints.frontage ?? 'auto'` line was removed. The dropdown is the
+single source of truth; AI updates the dropdown rather than a hidden variable.
+
+**`onApplyAI`**: When Gemini parses a frontage hint, it is reflected into the dropdown
+(mirrors the existing `basinCorner` reflection):
+```javascript
+if (hints.frontage !== undefined) {
+  document.getElementById('input-frontage').value = hints.frontage;
+}
+```
+This means typing "driveway on the north side" → Gemini returns `{frontage:'N'}` →
+dropdown switches to North → solver re-runs with North frontage.
 
 ---
 
@@ -218,45 +357,25 @@ After `turf.difference` operations, `free` can split into two disjoint regions.
 pieces are considered — previously it only searched `biggestPoly` and buildings
 could be falsely reported as not fitting.
 
+### Parking placement uses scan + sampleEdgeLat, not bbox
+The old approach of centering parking at the bbox midpoint fails for tilted parcels
+(corner tip has zero width) and for basin-clipped south bands (bbox extends into the
+basin). The current approach scans the south/north half of the free space in 30 steps
+to find where there is actually room, then pins the rectangle to the slanted boundary
+via `sampleEdgeLat`. This is symmetric with how E/W uses `sampleEdgeLng`. The
+rectangle is constructed to fit without clipping, so `turf.intersect` returns
+essentially the full parking area and the stall count matches the target.
+
 ---
 
-## Pending work (in priority order)
+## Pending work
 
-### 1. Step 4: Road frontage UI (index.html + main.js)
-Add to `index.html` sidebar, after the basin-corner label:
-```html
-<label class="sidebar-label">
-  Road frontage
-  <select id="input-frontage">
-    <option value="auto">Auto</option>
-    <option value="S">South</option>
-    <option value="N">North</option>
-    <option value="E">East</option>
-    <option value="W">West</option>
-  </select>
-</label>
-```
-In `main.js` `onSolve`, add to hints:
-```javascript
-frontage: document.getElementById('input-frontage').value,
-```
-(Remove the current `aiHints.frontage ?? 'auto'` line — the dropdown becomes the
-source of truth; AI still populates it via `onApplyAI`.)
-
-### 2. Step 5c: Reflect AI-parsed frontage into the dropdown
-In `main.js` `onApplyAI`:
-```javascript
-if (hints.frontage !== undefined) {
-  document.getElementById('input-frontage').value = hints.frontage;
-}
-```
-(Mirrors how `basinCorner` is reflected into `#input-basin-corner`.)
-
-### 3. Optional: basin corner 'auto' option
+### Optional: basin corner 'auto' option
 Currently the basin-corner dropdown always sends an explicit value (SW/SE/NW/NE),
-so the frontage-derived basin default (Step 3) never fires from the UI. Consider
-adding `<option value="auto">Auto (opposite road)</option>` and in `onSolve` only
-pass `basinCorner` to hints when the value is not 'auto'.
+so the frontage-derived basin default (Step 3, `S→NE, N→SW, W→SE, E→NW`) never fires
+from the UI — it only fires in AI-only or programmatic flows where `basinCorner` is
+absent from hints. Consider adding `<option value="auto">Auto (opposite road)</option>`
+and in `onSolve` only passing `basinCorner` to hints when the dropdown value is not 'auto'.
 
 ---
 
@@ -270,6 +389,8 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 
 ## Git log (recent)
 ```
+[this session] Fix S/N parking stall loss on slanted/tilted parcels (scan+sampleEdgeLat)
+[this session] Add Road Frontage UI dropdown (Step 4) + reflect AI frontage (Step 5c)
 35eafbe Fix E/W parking stall loss on slanted boundaries via multi-lat edge sampling
 30b322f Fix E/W parking placement on slanted parcels
 781f786 Fix E/W driveway: use parking cross-section as inner boundary, not bbox

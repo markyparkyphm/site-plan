@@ -158,19 +158,58 @@ function placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage) {
 
   if (frontage === 'S') {
     const depthDeg = depthFt / s.latToFt;
-    const widthDeg = (parkingSqFt / depthFt) / s.lngToFt;
-    const centerLng = (minLng + maxLng) / 2;
+    const neededWidthDeg = (parkingSqFt / depthFt) / s.lngToFt;
+    const bandHalf = 5 / s.latToFt;
+    // Scan upward from the south tip to find the southernmost lat where the free space
+    // is wide enough for the parking. For tilted parcels minLat is the corner tip (zero
+    // width); we must search upward until the cross-section reaches the needed width.
+    const STEPS = 30;
+    let refLat = null, bMinLng = minLng, bMaxLng = minLng;
+    for (let i = 0; i <= STEPS; i++) {
+      const lat = minLat + (i / STEPS) * (maxLat - minLat) * 0.5;
+      const band = turf.bboxPolygon([minLng - 1, lat - bandHalf, maxLng + 1, lat + bandHalf]);
+      const slice = turf.intersect(biggest, band);
+      if (!slice) continue;
+      const bb = turf.bbox(biggestPoly(slice));
+      const w = bb[2] - bb[0];
+      if (w > bMaxLng - bMinLng) { bMinLng = bb[0]; bMaxLng = bb[2]; refLat = lat; } // widest seen (fallback)
+      if (w >= neededWidthDeg) { bMinLng = bb[0]; bMaxLng = bb[2]; refLat = lat; break; } // southernmost viable
+    }
+    if (refLat === null) return null;
+    const widthDeg = Math.min(neededWidthDeg, bMaxLng - bMinLng);
+    const centerLng = (bMinLng + bMaxLng) / 2;
+    const halfW = widthDeg / 2;
+    // Find the actual south boundary lat at this lng span — handles slanted south edges.
+    const anchorLat = sampleEdgeLat(biggest, 'S', centerLng, halfW, minLat, maxLat, s) ?? refLat;
     parkingPoly = turf.bboxPolygon([
-      centerLng - widthDeg / 2, minLat,
-      centerLng + widthDeg / 2, minLat + depthDeg,
+      centerLng - halfW, anchorLat,
+      centerLng + halfW, anchorLat + depthDeg,
     ]);
   } else if (frontage === 'N') {
     const depthDeg = depthFt / s.latToFt;
-    const widthDeg = (parkingSqFt / depthFt) / s.lngToFt;
-    const centerLng = (minLng + maxLng) / 2;
+    const neededWidthDeg = (parkingSqFt / depthFt) / s.lngToFt;
+    const bandHalf = 5 / s.latToFt;
+    // Scan downward from the north tip — symmetric to the S case.
+    const STEPS = 30;
+    let refLat = null, bMinLng = minLng, bMaxLng = minLng;
+    for (let i = 0; i <= STEPS; i++) {
+      const lat = maxLat - (i / STEPS) * (maxLat - minLat) * 0.5;
+      const band = turf.bboxPolygon([minLng - 1, lat - bandHalf, maxLng + 1, lat + bandHalf]);
+      const slice = turf.intersect(biggest, band);
+      if (!slice) continue;
+      const bb = turf.bbox(biggestPoly(slice));
+      const w = bb[2] - bb[0];
+      if (w > bMaxLng - bMinLng) { bMinLng = bb[0]; bMaxLng = bb[2]; refLat = lat; }
+      if (w >= neededWidthDeg) { bMinLng = bb[0]; bMaxLng = bb[2]; refLat = lat; break; }
+    }
+    if (refLat === null) return null;
+    const widthDeg = Math.min(neededWidthDeg, bMaxLng - bMinLng);
+    const centerLng = (bMinLng + bMaxLng) / 2;
+    const halfW = widthDeg / 2;
+    const anchorLat = sampleEdgeLat(biggest, 'N', centerLng, halfW, minLat, maxLat, s) ?? refLat;
     parkingPoly = turf.bboxPolygon([
-      centerLng - widthDeg / 2, maxLat - depthDeg,
-      centerLng + widthDeg / 2, maxLat,
+      centerLng - halfW, anchorLat - depthDeg,
+      centerLng + halfW, anchorLat,
     ]);
   } else if (frontage === 'W') {
     const depthDeg = depthFt / s.lngToFt;
@@ -316,6 +355,27 @@ function sampleEdgeLng(poly, side, centerLat, halfWidthDeg, minLng, maxLng, s) {
     const bbox = turf.bbox(slice);
     if (side === 'E') result = Math.min(result, bbox[2]);
     else              result = Math.max(result, bbox[0]);
+  }
+  return isFinite(result) ? result : null;
+}
+
+// For S/N parking: find the most-constrained lat of the south or north boundary,
+// sampled at SAMPLES longitudes across centerLng ± halfWidthDeg.
+// 'S' → northernmost (highest) south edge — parking must start here or above.
+// 'N' → southernmost (lowest) north edge — parking must end here or below.
+// Mirrors sampleEdgeLng: both find the tightest boundary across the parking span.
+function sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s) {
+  const SAMPLES = 7;
+  const bandHalf = 10 / s.lngToFt;
+  let result = side === 'S' ? -Infinity : Infinity;
+  for (let i = 0; i < SAMPLES; i++) {
+    const lng = centerLng - halfWidthDeg + (i / (SAMPLES - 1)) * 2 * halfWidthDeg;
+    const band = turf.bboxPolygon([lng - bandHalf, minLat - 1, lng + bandHalf, maxLat + 1]);
+    const slice = turf.intersect(poly, band);
+    if (!slice) continue;
+    const bb = turf.bbox(biggestPoly(slice));
+    if (side === 'S') result = Math.max(result, bb[1]); // northernmost south edge
+    else              result = Math.min(result, bb[3]); // southernmost north edge
   }
   return isFinite(result) ? result : null;
 }
