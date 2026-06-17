@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Site Planner</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
 </head>
 <body>
   <div id="sidebar">
@@ -18,6 +19,10 @@
       <button id="btn-clear">Clear</button>
     </div>
     <div id="acreage"></div>
+    <label class="sidebar-label">
+      Setback (ft)
+      <input id="input-setback" type="number" value="20" min="0" max="500">
+    </label>
     <div id="status"></div>
   </div>
   <div id="map"></div>

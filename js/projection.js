@@ -1,45 +1,52 @@
 const METERS_PER_DEGREE_LAT = 111320;
 const SQFT_PER_ACRE = 43560;
+const FEET_PER_METER = 3.28084;
+
+export function computeCentroid(parcelLatLng) {
+  return {
+    lat: parcelLatLng.reduce((s, p) => s + p.lat, 0) / parcelLatLng.length,
+    lng: parcelLatLng.reduce((s, p) => s + p.lng, 0) / parcelLatLng.length,
+  };
+}
+
+export function computeScaleFactors(centroid) {
+  const metersPerDegreeLng = METERS_PER_DEGREE_LAT * Math.cos(centroid.lat * Math.PI / 180);
+  return {
+    latToFt: METERS_PER_DEGREE_LAT * FEET_PER_METER,
+    lngToFt: metersPerDegreeLng * FEET_PER_METER,
+  };
+}
+
+export function latLngToFeetFromCentroid(latLng, centroid) {
+  const s = computeScaleFactors(centroid);
+  return {
+    x: (latLng.lng - centroid.lng) * s.lngToFt,
+    y: (latLng.lat - centroid.lat) * s.latToFt,
+  };
+}
+
+export function feetToLatLngFromCentroid(ptFt, centroid) {
+  const s = computeScaleFactors(centroid);
+  return {
+    lat: centroid.lat + ptFt.y / s.latToFt,
+    lng: centroid.lng + ptFt.x / s.lngToFt,
+  };
+}
 
 export function latLngToFeet(parcelLatLng) {
-  const latSum = parcelLatLng.reduce((s, p) => s + p.lat, 0);
-  const lngSum = parcelLatLng.reduce((s, p) => s + p.lng, 0);
-  const centroidLat = latSum / parcelLatLng.length;
-  const centroidLng = lngSum / parcelLatLng.length;
-
-  const metersPerDegreeLng = METERS_PER_DEGREE_LAT * Math.cos(centroidLat * Math.PI / 180);
-  const FEET_PER_METER = 3.28084;
-
-  return parcelLatLng.map(p => ({
-    x: (p.lng - centroidLng) * metersPerDegreeLng * FEET_PER_METER,
-    y: (p.lat - centroidLat) * METERS_PER_DEGREE_LAT * FEET_PER_METER,
-  }));
+  const centroid = computeCentroid(parcelLatLng);
+  return parcelLatLng.map(p => latLngToFeetFromCentroid(p, centroid));
 }
 
 export function feetToLatLng(ptsFt, parcelLatLng) {
-  const latSum = parcelLatLng.reduce((s, p) => s + p.lat, 0);
-  const lngSum = parcelLatLng.reduce((s, p) => s + p.lng, 0);
-  const centroidLat = latSum / parcelLatLng.length;
-  const centroidLng = lngSum / parcelLatLng.length;
-
-  const metersPerDegreeLng = METERS_PER_DEGREE_LAT * Math.cos(centroidLat * Math.PI / 180);
-  const FEET_PER_METER = 3.28084;
-
-  return ptsFt.map(p => ({
-    lat: centroidLat + p.y / (METERS_PER_DEGREE_LAT * FEET_PER_METER),
-    lng: centroidLng + p.x / (metersPerDegreeLng * FEET_PER_METER),
-  }));
+  const centroid = computeCentroid(parcelLatLng);
+  return ptsFt.map(p => feetToLatLngFromCentroid(p, centroid));
 }
 
-export function acresToSqFt(acres) {
-  return acres * SQFT_PER_ACRE;
-}
+export function acresToSqFt(acres) { return acres * SQFT_PER_ACRE; }
+export function sqFtToAcres(sqFt) { return sqFt / SQFT_PER_ACRE; }
 
-export function sqFtToAcres(sqFt) {
-  return sqFt / SQFT_PER_ACRE;
-}
-
-// Shoelace formula — area in sq ft from {x,y} points
+// Shoelace formula — area in sq ft from {x,y} feet points
 export function polygonAreaSqFt(ptsFt) {
   let area = 0;
   const n = ptsFt.length;
