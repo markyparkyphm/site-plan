@@ -54,7 +54,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
   // 4. Driveways
   const driveways = [];
   if (parking && (reqs.driveways ?? 1) > 0) {
-    const dws = makeDriveways(parcel, parking, reqs.driveways ?? 1, centroid, frontage);
+    const dws = makeDriveways(parcel, parking, reqs.driveways ?? 1, centroid, frontage, buildable);
     dws.forEach(d => {
       driveways.push(d);
       free = turf.difference(free, turf.buffer(d, 3, { units: 'feet' })) ?? free;
@@ -204,17 +204,20 @@ function placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage) {
   return clipped;
 }
 
-// Driveway strips from the frontage edge of the parcel inward to the parking block
-function makeDriveways(parcel, parking, count, centroid, frontage) {
+// Driveway strips from the frontage edge of the parcel inward to the parking block.
+// For S/N: simple bbox strip (parcel south/north edge is typically axis-aligned).
+// For E/W: intersect the lat strip with the actual parcel polygon then subtract the
+// buildable zone — this correctly follows slanted parcel boundaries instead of
+// anchoring to a bbox max/min that may be outside the parcel at the driveway latitude.
+function makeDriveways(parcel, parking, count, centroid, frontage, buildable) {
   const s = computeScaleFactors(centroid);
   const [pMinLng, pMinLat, pMaxLng, pMaxLat] = turf.bbox(parking);
   const [parMinLng, parMinLat, parMaxLng, parMaxLat] = turf.bbox(parcel);
   const driveways = [];
+  const BIG = 1; // 1 degree — safely beyond any parcel
 
   if (frontage === 'S' || frontage === 'N') {
     const widthDeg = 24 / s.lngToFt;
-    // For S: run from parcel south edge to parking south edge
-    // For N: run from parking north edge to parcel north edge
     const outerLat = frontage === 'S' ? parMinLat : parMaxLat;
     const innerLat = frontage === 'S' ? pMinLat   : pMaxLat;
     for (let i = 0; i < count; i++) {
@@ -229,19 +232,35 @@ function makeDriveways(parcel, parking, count, centroid, frontage) {
     }
   } else { // 'W' or 'E'
     const widthDeg = 24 / s.latToFt;
-    // For W: run from parcel west edge to parking west edge
-    // For E: run from parking east edge to parcel east edge
-    const outerLng = frontage === 'W' ? parMinLng : parMaxLng;
-    const innerLng = frontage === 'W' ? pMinLng   : pMaxLng;
+    const [bldMinLng,, bldMaxLng] = turf.bbox(buildable);
+    const bldCenterLng = (bldMinLng + bldMaxLng) / 2;
+
     for (let i = 0; i < count; i++) {
       const offset = (i + 1) / (count + 1);
       const centerLat = pMinLat + offset * (pMaxLat - pMinLat);
-      const dw = turf.bboxPolygon([
-        Math.min(innerLng, outerLng), centerLat - widthDeg / 2,
-        Math.max(innerLng, outerLng), centerLat + widthDeg / 2,
+
+      // Full-width lat strip — the parcel intersection gives the correct shape
+      // even on slanted boundaries (avoids bbox-anchor bug)
+      const latStrip = turf.bboxPolygon([
+        parMinLng - BIG, centerLat - widthDeg / 2,
+        parMaxLng + BIG, centerLat + widthDeg / 2,
       ]);
-      const clipped = turf.intersect(parcel, dw);
-      if (clipped) driveways.push(clipped);
+      const parcelSlice = turf.intersect(parcel, latStrip);
+      if (!parcelSlice) continue;
+
+      // Remove the buildable (setback) zone to isolate the setback corridor
+      const buildableSlice = buildable ? turf.intersect(buildable, latStrip) : null;
+      let dw = buildableSlice ? turf.difference(parcelSlice, buildableSlice) : parcelSlice;
+      if (!dw) continue;
+
+      // Keep only the side that faces the road
+      const sideMask = turf.bboxPolygon(
+        frontage === 'E'
+          ? [bldCenterLng, centerLat - BIG, parMaxLng + BIG, centerLat + BIG]
+          : [parMinLng - BIG, centerLat - BIG, bldCenterLng, centerLat + BIG]
+      );
+      dw = turf.intersect(dw, sideMask);
+      if (dw) driveways.push(dw);
     }
   }
   return driveways;
