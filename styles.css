@@ -61,6 +61,46 @@ button {
   width: 100%;
 }
 
+.sidebar-section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+
+.building-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.building-row input {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  color: #e5e7eb;
+  padding: 5px 6px;
+  font-size: 0.82rem;
+  min-width: 0;
+}
+
+.b-label { flex: 1; }
+.b-len, .b-wid { flex: 1.4; }
+
+#btn-add-building {
+  background: transparent;
+  border: 1px dashed #374151;
+  color: #6b7280;
+  font-size: 0.82rem;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  width: 100%;
+}
+#btn-add-building:hover { border-color: #6b7280; color: #d1d5db; }
+
 #btn-solve { background: #7c3aed; color: #fff; }
 #btn-solve:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
 #btn-solve:not(:disabled):hover { opacity: 0.85; }
