@@ -176,18 +176,28 @@ function placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage) {
     const depthDeg = depthFt / s.lngToFt;
     const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
     const centerLat = (minLat + maxLat) / 2;
+    // Sample the actual free-space west extent at centerLat; the bbox minLng may
+    // be at a corner far from where the boundary sits at this latitude.
+    const band = turf.bboxPolygon([minLng - 1, centerLat - 50 / s.latToFt, maxLng + 1, centerLat + 50 / s.latToFt]);
+    const freeAtCenter = turf.intersect(biggest, band);
+    const edgeLng = freeAtCenter ? turf.bbox(freeAtCenter)[0] : minLng;
     parkingPoly = turf.bboxPolygon([
-      minLng, centerLat - widthDeg / 2,
-      minLng + depthDeg, centerLat + widthDeg / 2,
+      edgeLng, centerLat - widthDeg / 2,
+      edgeLng + depthDeg, centerLat + widthDeg / 2,
     ]);
     orientationDeg = 90;
   } else { // 'E'
     const depthDeg = depthFt / s.lngToFt;
     const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
     const centerLat = (minLat + maxLat) / 2;
+    // Sample the actual free-space east extent at centerLat; the bbox maxLng may
+    // be at a corner far from where the boundary sits at this latitude.
+    const band = turf.bboxPolygon([minLng - 1, centerLat - 50 / s.latToFt, maxLng + 1, centerLat + 50 / s.latToFt]);
+    const freeAtCenter = turf.intersect(biggest, band);
+    const edgeLng = freeAtCenter ? turf.bbox(freeAtCenter)[2] : maxLng;
     parkingPoly = turf.bboxPolygon([
-      maxLng - depthDeg, centerLat - widthDeg / 2,
-      maxLng, centerLat + widthDeg / 2,
+      edgeLng - depthDeg, centerLat - widthDeg / 2,
+      edgeLng, centerLat + widthDeg / 2,
     ]);
     orientationDeg = 90;
   }
