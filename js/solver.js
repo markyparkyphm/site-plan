@@ -1,21 +1,31 @@
 import { toPoly, biggestPoly, rectPoly, reach, gridPointsInside } from './geometry.js';
 import { computeCentroid, latLngToFeetFromCentroid, computeScaleFactors } from './projection.js';
 
+// Resolve the working frontage from hints; 'auto' defaults to 'S' until detection lands
+function resolveFrontage(parcelLatLng, hints) {
+  if (['N', 'S', 'E', 'W'].includes(hints.frontage)) return hints.frontage;
+  return 'S';
+}
+
+const FRONTAGE_TO_BASIN_CORNER = { S: 'NE', N: 'SW', W: 'SE', E: 'NW' };
+
 // Entry point — called by main.js after boundary + reqs are set
 export function solveLayout(parcelLatLng, reqs, hints) {
   const centroid = computeCentroid(parcelLatLng);
   const parcel = toPoly(parcelLatLng);
   const setback = hints.setbackFt ?? 20;
+  const frontage = resolveFrontage(parcelLatLng, hints);
   const warnings = [];
 
   // 1. Buildable area
   const buildable = turf.buffer(parcel, -setback, { units: 'feet' });
   if (!buildable) return infeasible('Setback too large for this parcel.');
 
-  // 2. Detention basin
+  // 2. Detention basin — default corner is opposite the frontage edge
   const parcelAreaSqFt = turf.area(parcel) * 10.7639;
   const targetSqFt = reqs.pondSqFt ?? (reqs.pondPct / 100) * parcelAreaSqFt;
-  const basin = growCornerClip(buildable, hints.basinCorner ?? 'SW', targetSqFt, centroid);
+  const basinCorner = hints.basinCorner ?? FRONTAGE_TO_BASIN_CORNER[frontage];
+  const basin = growCornerClip(buildable, basinCorner, targetSqFt, centroid);
   if (!basin) {
     warnings.push('Could not fit detention basin at target size.');
   } else {
@@ -35,7 +45,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
   const parkingSqFt = (reqs.parking_stalls ?? 0) * 325;
   let parking = null;
   if (parkingSqFt > 0) {
-    parking = placeAlongSouthEdge(free, parkingSqFt, centroid);
+    parking = placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage);
     if (parking) {
       free = turf.difference(free, turf.buffer(parking, 5, { units: 'feet' })) ?? free;
     }
@@ -44,7 +54,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
   // 4. Driveways
   const driveways = [];
   if (parking && (reqs.driveways ?? 1) > 0) {
-    const dws = makeDriveways(parcel, parking, reqs.driveways ?? 1, centroid);
+    const dws = makeDriveways(parcel, parking, reqs.driveways ?? 1, centroid, frontage);
     dws.forEach(d => {
       driveways.push(d);
       free = turf.difference(free, turf.buffer(d, 3, { units: 'feet' })) ?? free;
@@ -135,58 +145,104 @@ function growCornerClip(buildable, corner, targetSqFt, centroid) {
   return best;
 }
 
-// Place a parking rectangle against the south edge of free using fixed 60 ft depth
-function placeAlongSouthEdge(free, parkingSqFt, centroid) {
+// Place a parking block against the frontage edge of free, 60 ft deep, clipped to free
+function placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage) {
   const biggest = biggestPoly(free);
   if (!biggest) return null;
 
   const s = computeScaleFactors(centroid);
-  const [minLng, minLat, maxLng] = turf.bbox(biggest);
-
-  // Fixed 60 ft depth (2 rows + aisle); compute width needed
+  const [minLng, minLat, maxLng, maxLat] = turf.bbox(biggest);
   const depthFt = 60;
-  const depthDeg = depthFt / s.latToFt;
-  const widthFt = parkingSqFt / depthFt;
-  const widthDeg = widthFt / s.lngToFt;
+  let parkingPoly;
+  let orientationDeg = 0;
 
-  // Center the parking rectangle along the south edge
-  const centerLng = (minLng + maxLng) / 2;
-  const parkingPoly = turf.bboxPolygon([
-    centerLng - widthDeg / 2, minLat,
-    centerLng + widthDeg / 2, minLat + depthDeg,
-  ]);
+  if (frontage === 'S') {
+    const depthDeg = depthFt / s.latToFt;
+    const widthDeg = (parkingSqFt / depthFt) / s.lngToFt;
+    const centerLng = (minLng + maxLng) / 2;
+    parkingPoly = turf.bboxPolygon([
+      centerLng - widthDeg / 2, minLat,
+      centerLng + widthDeg / 2, minLat + depthDeg,
+    ]);
+  } else if (frontage === 'N') {
+    const depthDeg = depthFt / s.latToFt;
+    const widthDeg = (parkingSqFt / depthFt) / s.lngToFt;
+    const centerLng = (minLng + maxLng) / 2;
+    parkingPoly = turf.bboxPolygon([
+      centerLng - widthDeg / 2, maxLat - depthDeg,
+      centerLng + widthDeg / 2, maxLat,
+    ]);
+  } else if (frontage === 'W') {
+    const depthDeg = depthFt / s.lngToFt;
+    const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
+    const centerLat = (minLat + maxLat) / 2;
+    parkingPoly = turf.bboxPolygon([
+      minLng, centerLat - widthDeg / 2,
+      minLng + depthDeg, centerLat + widthDeg / 2,
+    ]);
+    orientationDeg = 90;
+  } else { // 'E'
+    const depthDeg = depthFt / s.lngToFt;
+    const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
+    const centerLat = (minLat + maxLat) / 2;
+    parkingPoly = turf.bboxPolygon([
+      maxLng - depthDeg, centerLat - widthDeg / 2,
+      maxLng, centerLat + widthDeg / 2,
+    ]);
+    orientationDeg = 90;
+  }
 
   const clipped = turf.intersect(biggest, parkingPoly);
-
   const actualSqFt = clipped ? turf.area(clipped) * 10.7639 : 0;
   const stallCount = Math.floor(actualSqFt / 325);
-
   if (!clipped || stallCount < 1) return null;
 
-  // Compute center in feet for the output schema
   const [cMinLng, cMinLat, cMaxLng, cMaxLat] = turf.bbox(clipped);
   const cx_ft = latLngToFeetFromCentroid({ lat: (cMinLat + cMaxLat) / 2, lng: (cMinLng + cMaxLng) / 2 }, centroid).x;
   const cy_ft = latLngToFeetFromCentroid({ lat: (cMinLat + cMaxLat) / 2, lng: (cMinLng + cMaxLng) / 2 }, centroid).y;
-
-  clipped.properties = { center_x_ft: cx_ft, center_y_ft: cy_ft, orientation_deg: 0, stall_count: stallCount };
+  clipped.properties = { center_x_ft: cx_ft, center_y_ft: cy_ft, orientation_deg: orientationDeg, stall_count: stallCount };
   return clipped;
 }
 
-function makeDriveways(parcel, parking, count, centroid) {
-  const [pMinLng, pMinLat, pMaxLng] = turf.bbox(parking);
-  const [,  parMinLat] = turf.bbox(parcel);
+// Driveway strips from the frontage edge of the parcel inward to the parking block
+function makeDriveways(parcel, parking, count, centroid, frontage) {
+  const s = computeScaleFactors(centroid);
+  const [pMinLng, pMinLat, pMaxLng, pMaxLat] = turf.bbox(parking);
+  const [parMinLng, parMinLat, parMaxLng, parMaxLat] = turf.bbox(parcel);
   const driveways = [];
-  const drivewayWidthDeg = 24 / computeScaleFactors(centroid).lngToFt;
 
-  for (let i = 0; i < count; i++) {
-    const offset = (i + 1) / (count + 1);
-    const centerLng = pMinLng + offset * (pMaxLng - pMinLng);
-    const dw = turf.bboxPolygon([
-      centerLng - drivewayWidthDeg / 2, parMinLat,
-      centerLng + drivewayWidthDeg / 2, pMinLat,
-    ]);
-    const clipped = turf.intersect(parcel, dw);
-    if (clipped) driveways.push(clipped);
+  if (frontage === 'S' || frontage === 'N') {
+    const widthDeg = 24 / s.lngToFt;
+    // For S: run from parcel south edge to parking south edge
+    // For N: run from parking north edge to parcel north edge
+    const outerLat = frontage === 'S' ? parMinLat : parMaxLat;
+    const innerLat = frontage === 'S' ? pMinLat   : pMaxLat;
+    for (let i = 0; i < count; i++) {
+      const offset = (i + 1) / (count + 1);
+      const centerLng = pMinLng + offset * (pMaxLng - pMinLng);
+      const dw = turf.bboxPolygon([
+        centerLng - widthDeg / 2, Math.min(innerLat, outerLat),
+        centerLng + widthDeg / 2, Math.max(innerLat, outerLat),
+      ]);
+      const clipped = turf.intersect(parcel, dw);
+      if (clipped) driveways.push(clipped);
+    }
+  } else { // 'W' or 'E'
+    const widthDeg = 24 / s.latToFt;
+    // For W: run from parcel west edge to parking west edge
+    // For E: run from parking east edge to parcel east edge
+    const outerLng = frontage === 'W' ? parMinLng : parMaxLng;
+    const innerLng = frontage === 'W' ? pMinLng   : pMaxLng;
+    for (let i = 0; i < count; i++) {
+      const offset = (i + 1) / (count + 1);
+      const centerLat = pMinLat + offset * (pMaxLat - pMinLat);
+      const dw = turf.bboxPolygon([
+        Math.min(innerLng, outerLng), centerLat - widthDeg / 2,
+        Math.max(innerLng, outerLng), centerLat + widthDeg / 2,
+      ]);
+      const clipped = turf.intersect(parcel, dw);
+      if (clipped) driveways.push(clipped);
+    }
   }
   return driveways;
 }

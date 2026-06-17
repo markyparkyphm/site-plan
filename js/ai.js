@@ -5,11 +5,13 @@ Allowed fields (omit any field not mentioned by the user):
 - clearanceFt: number (minimum clearance between buildings, in feet)
 - basinCorner: one of "SW" | "SE" | "NW" | "NE" (which corner to place the detention basin)
 - orientationPreference: one of "NS" | "EW" | "auto" (preferred building axis)
+- frontage: one of "N" | "S" | "E" | "W" (which parcel edge fronts the road)
 
 Output ONLY valid JSON. No explanation, no markdown fences, no extra text.`;
 
-const VALID_CORNERS = ['SW', 'SE', 'NW', 'NE'];
-const VALID_ORIENTS = ['NS', 'EW', 'auto'];
+const VALID_CORNERS  = ['SW', 'SE', 'NW', 'NE'];
+const VALID_ORIENTS  = ['NS', 'EW', 'auto'];
+const VALID_FRONTAGE = ['N', 'S', 'E', 'W'];
 
 export async function parseInstructions(text) {
   if (!window.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set in config.js');
@@ -47,6 +49,8 @@ export async function parseInstructions(text) {
     hints.basinCorner = parsed.basinCorner;
   if (VALID_ORIENTS.includes(parsed.orientationPreference))
     hints.orientationPreference = parsed.orientationPreference;
+  if (VALID_FRONTAGE.includes(parsed.frontage))
+    hints.frontage = parsed.frontage;
 
   return hints;
 }
