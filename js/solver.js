@@ -176,28 +176,26 @@ function placeAlongFrontageEdge(free, parkingSqFt, centroid, frontage) {
     const depthDeg = depthFt / s.lngToFt;
     const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
     const centerLat = (minLat + maxLat) / 2;
-    // Sample the actual free-space west extent at centerLat; the bbox minLng may
-    // be at a corner far from where the boundary sits at this latitude.
-    const band = turf.bboxPolygon([minLng - 1, centerLat - 50 / s.latToFt, maxLng + 1, centerLat + 50 / s.latToFt]);
-    const freeAtCenter = turf.intersect(biggest, band);
-    const edgeLng = freeAtCenter ? turf.bbox(freeAtCenter)[0] : minLng;
+    const halfW = widthDeg / 2;
+    // Sample the west boundary at 7 latitudes across the parking height and take
+    // the rightmost (most constrained) point so the rectangle fits without clipping.
+    const edgeLng = sampleEdgeLng(biggest, 'W', centerLat, halfW, minLng, maxLng, s) ?? minLng;
     parkingPoly = turf.bboxPolygon([
-      edgeLng, centerLat - widthDeg / 2,
-      edgeLng + depthDeg, centerLat + widthDeg / 2,
+      edgeLng, centerLat - halfW,
+      edgeLng + depthDeg, centerLat + halfW,
     ]);
     orientationDeg = 90;
   } else { // 'E'
     const depthDeg = depthFt / s.lngToFt;
     const widthDeg = (parkingSqFt / depthFt) / s.latToFt;
     const centerLat = (minLat + maxLat) / 2;
-    // Sample the actual free-space east extent at centerLat; the bbox maxLng may
-    // be at a corner far from where the boundary sits at this latitude.
-    const band = turf.bboxPolygon([minLng - 1, centerLat - 50 / s.latToFt, maxLng + 1, centerLat + 50 / s.latToFt]);
-    const freeAtCenter = turf.intersect(biggest, band);
-    const edgeLng = freeAtCenter ? turf.bbox(freeAtCenter)[2] : maxLng;
+    const halfW = widthDeg / 2;
+    // Sample the east boundary at 7 latitudes across the parking height and take
+    // the leftmost (most constrained) point so the rectangle fits without clipping.
+    const edgeLng = sampleEdgeLng(biggest, 'E', centerLat, halfW, minLng, maxLng, s) ?? maxLng;
     parkingPoly = turf.bboxPolygon([
-      edgeLng - depthDeg, centerLat - widthDeg / 2,
-      edgeLng, centerLat + widthDeg / 2,
+      edgeLng - depthDeg, centerLat - halfW,
+      edgeLng, centerLat + halfW,
     ]);
     orientationDeg = 90;
   }
@@ -301,6 +299,25 @@ function zoneCentroid(parcelLatLng, i, N, centroid) {
 
 function dist2(a, b) {
   return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+}
+
+// For E/W parking: find the most-constrained edge longitude across the parking's
+// full lat span so the rectangle fits entirely inside the free space.
+// 'E' → returns the minimum east extent (leftmost boundary); 'W' → maximum west.
+function sampleEdgeLng(poly, side, centerLat, halfWidthDeg, minLng, maxLng, s) {
+  const SAMPLES = 7;
+  const bandHalf = 10 / s.latToFt; // 10 ft sampling band
+  let result = side === 'E' ? Infinity : -Infinity;
+  for (let i = 0; i < SAMPLES; i++) {
+    const lat = centerLat - halfWidthDeg + (i / (SAMPLES - 1)) * 2 * halfWidthDeg;
+    const band = turf.bboxPolygon([minLng - 1, lat - bandHalf, maxLng + 1, lat + bandHalf]);
+    const slice = turf.intersect(poly, band);
+    if (!slice) continue;
+    const bbox = turf.bbox(slice);
+    if (side === 'E') result = Math.min(result, bbox[2]);
+    else              result = Math.max(result, bbox[0]);
+  }
+  return isFinite(result) ? result : null;
 }
 
 function infeasible(reason) {
