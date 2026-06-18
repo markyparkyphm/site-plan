@@ -11,7 +11,7 @@ satellite imagery background and exports as PNG.
 
 ## Current status
 
-All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–C COMPLETE.
+All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–D COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -58,6 +58,7 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | arrange.js Phase B: parking → building face, stall-count sizing, clip-to-free | js/arrange.js | fd55d90 | ✅ |
 | arrange.js Phase C: driveway connects parcelFrontage → parking, entryU | js/arrange.js | fd55d90 | ✅ |
 | USE_ARRANGER = true (arranger is live for Solve button) | js/main.js | fd55d90 | ✅ |
+| arrange.js Phase D: group/strip, childToGroup topo-sort, scanGroupPlacement, parking clearance fix, driveway vTarget fix, bSetbackFt, error handling | js/arrange.js + js/main.js | 49a2606 | ✅ |
 
 ---
 
@@ -85,7 +86,7 @@ js/
   score.js          score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
                     PROFILES.retail — scoring weights + placement defaults
   optimize.js       optimizeLayout(...) — 4 basin corners, keep highest score
-  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phases A–C
+  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phases A–D
 ```
 
 ---
@@ -274,7 +275,7 @@ baseHints = {
 ### Spec file
 `relational-placement-spec.md` — read this before implementing any phase.
 
-### Current status: Phases A–C COMPLETE (committed fd55d90, 2026-06-18)
+### Current status: Phases A–D COMPLETE (Phase D completed 2026-06-18)
 
 ### Entry point
 ```javascript
@@ -491,14 +492,394 @@ parcel polygon keeps the driveway inside the lot while covering the setback stri
 
 ---
 
-### realizeElement dispatch (Phase C)
+### realizeElement dispatch (Phase D)
 ```javascript
 function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
   if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
   if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
   if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
+  if (el.type === 'group')    return realizeGroup(el, free, parcelFt, frame, centroid, profile);
   return { id: el.id, type: el.type, feasible: false,
-           reason: `${el.type} not implemented (Phase C: building + parking + driveway only)` };
+           reason: `${el.type} not implemented` };
+}
+```
+
+---
+
+### Phase D — realizeGroup (group/strip along t̂)
+
+**Schema element:**
+```json
+{ "id": "g1", "type": "group", "layout": "strip",
+  "place": { "anchor": "parcelFrontage", "setbackFt": 110 },
+  "gapFt": 0,
+  "children": [
+    { "id": "A", "size": { "areaSqFt": 20000, "maxDepthFt": 100 } },
+    { "id": "B", "size": { "areaSqFt": 12000, "maxDepthFt": 80  } }
+  ] }
+```
+
+**Child size derivation (per child):**
+```javascript
+areaSqFt   = c.size.areaSqFt ?? (profile.defaultBuildingAreaSqFt ?? 12000)
+maxDepthFt = c.size.maxDepthFt ?? (profile.maxBuildingDepthFt ?? 70)
+depthFt    = min(maxDepthFt, sqrt(areaSqFt))   // depth along n̂
+faceFt     = areaSqFt / depthFt                 // face along t̂
+```
+
+**Group bounding box:**
+```javascript
+N            = children.length
+totalFaceFt  = sum(child.faceFt) + gapFt * (N - 1)   // total width along t̂
+groupDepthFt = max(child.depthFt for all children)      // depth = deepest child
+
+// Orient so that the group's face (totalFaceFt) aligns with t̂
+tIsX         = |frame.t.x| > 0.5                         // true for S/N frontage
+faceIsLonger = totalFaceFt >= groupDepthFt
+groupOrientDeg = tIsX ? (faceIsLonger ? 0 : 90) : (faceIsLonger ? 90 : 0)
+
+bSpec = {
+  label:     el.id,
+  length_ft: max(totalFaceFt, groupDepthFt),
+  width_ft:  min(totalFaceFt, groupDepthFt),
+}
+```
+
+**Group placement — `scanGroupPlacement` (NOT `placeBuilding`):**
+
+`placeBuilding` uses `reach = hypot(length, width)/2` for isotropic erosion. For a
+300×80 group this gives reach ≈ 155 ft — which eats 310 ft of parcel depth (both sides),
+leaving no legal zone on typical shallow parcels.
+
+`scanGroupPlacement` instead uses DIRECT POLYGON CONTAINMENT: it builds the exact
+bounding box polygon at each candidate position and calls `turf.intersect` to verify fit.
+For an 80 ft deep group, only 40 ft of clearance from the N/S boundary is needed.
+
+```javascript
+function scanGroupPlacement(free, parcelFt, frame, centroid,
+                            totalFaceFt, groupDepthFt, startU, startV) {
+  const halfFace  = totalFaceFt  / 2;
+  const halfDepth = groupDepthFt / 2;
+
+  const makeBox = (u, v) => {
+    // Build a lat/lng polygon for the W×D rectangle centred at local (u,v)
+    const ring = [
+      [u-halfFace, v-halfDepth], [u+halfFace, v-halfDepth],
+      [u+halfFace, v+halfDepth], [u-halfFace, v+halfDepth],
+      [u-halfFace, v-halfDepth],
+    ].map(([uu, vv]) => {
+      const ft = localToFeet(uu, vv, frame);
+      const ll = feetToLatLngFromCentroid(ft, centroid);
+      return [ll.lng, ll.lat];
+    });
+    return turf.polygon([ring]);
+  };
+
+  const boxArea = turf.area(makeBox(startU, startV));   // constant across positions
+  const fits = (u, v) => {
+    const isect = turf.intersect(free, makeBox(u, v));
+    return isect != null && turf.area(isect) >= boxArea * 0.999;
+  };
+
+  // Scan forward (deeper into lot) in 10 ft steps from startV.
+  // At each depth, try 5 lateral shifts to handle slanted parcel edges.
+  const vs      = parcelFt.map(p => feetToLocal(p, frame).v);
+  const vMax    = Math.max(...vs);
+  const uShifts = [0, halfFace*0.25, -halfFace*0.25, halfFace*0.5, -halfFace*0.5];
+
+  for (let vi = 0; vi < 80; vi++) {
+    const testV = startV + vi * 10;
+    if (testV + halfDepth > vMax) break;
+    for (const uOff of uShifts) {
+      if (fits(startU + uOff, testV)) {
+        const ft = localToFeet(startU + uOff, testV, frame);
+        return { center_x_ft: ft.x, center_y_ft: ft.y };
+      }
+    }
+  }
+  return null;
+}
+```
+
+**Target position:**
+```javascript
+vFront  = frontageV(parcelFt, frame)
+targetV = vFront + setbackFt + groupDepthFt / 2
+// setbackFt comes from el.place.setbackFt (= bSetbackFt, which includes parking depth)
+
+const groupCenter = scanGroupPlacement(free, parcelFt, frame, centroid,
+                                       totalFaceFt, groupDepthFt, 0, targetV);
+if (!groupCenter) return failAll('Group bounding box does not fit at parcelFrontage');
+const placed = { ...bSpec, ...groupCenter };
+// placed has: label, length_ft, width_ft, center_x_ft, center_y_ft
+```
+
+**If `scanGroupPlacement` returns null** → `failAll(reason)` marks the group infeasible
+AND marks all children infeasible with reason `"Parent group infeasible: ..."`.
+
+**Child distribution along t̂ (front-face aligned):**
+All children's FRONT FACES are aligned to the group's front face (v = groupFrontV).
+Shorter children leave open space at their rear, not at the front.
+
+```javascript
+const placedLocal = feetToLocal({ x: placed.center_x_ft, y: placed.center_y_ft }, frame);
+const groupFrontV = placedLocal.v - groupDepthFt / 2;  // front face v-coord
+let   uCursor     = placedLocal.u - totalFaceFt / 2;   // start at left edge
+
+const childResults = childSpecs.map(cSpec => {
+  const childU = uCursor + cSpec.faceFt / 2;
+  uCursor     += cSpec.faceFt + gapFt;
+  const childV = groupFrontV + cSpec.depthFt / 2;     // front-aligned, not depth-centered
+  const childFt = localToFeet(childU, childV, frame);
+
+  const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+  const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+
+  return {
+    id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+    length_ft:       Math.max(cSpec.faceFt, cSpec.depthFt),
+    width_ft:        Math.min(cSpec.faceFt, cSpec.depthFt),
+    center_x_ft:     childFt.x,
+    center_y_ft:     childFt.y,
+    orientation_deg: childOrientDeg,
+  };
+});
+```
+
+**Group result:**
+```javascript
+{
+  id: el.id, type: 'group', feasible: true,
+  placed,            // { label, length_ft, width_ft, center_x_ft, center_y_ft }
+  orientation_deg: groupOrientDeg,
+  childResults,      // array of child building results
+}
+```
+
+**Free space update in `realizeArrangement`:**
+The GROUP BOUNDING BOX (not individual children) is subtracted from free, with a
+clearanceFt buffer. This prevents double-buffering.
+```javascript
+} else if (result.feasible && result.type === 'group') {
+  const p    = result.placed;
+  const foot = rectPoly(p.center_x_ft, p.center_y_ft, p.length_ft, p.width_ft,
+                        result.orientation_deg, centroid);
+  const buf  = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
+  if (buf) free = turf.difference(free, buf) ?? free;
+}
+```
+
+**Child results registered into `realized` and `results`:**
+After the group result is pushed, each child is registered under its own ID so
+downstream elements (parking, driveways) can anchor to child IDs directly:
+```javascript
+if (result.childResults) {
+  for (const child of result.childResults) {
+    realized[child.id] = child;   // e.g. realized['A'], realized['B']
+    results.push(child);           // also appears as top-level element
+  }
+}
+```
+
+---
+
+### Phase D — topoSort update (`childToGroup`)
+
+Parking and driveways can anchor to group CHILDREN (e.g., `anchor: "A"` where "A" is
+inside group "g1"). The topo-sort must resolve such deps to the parent GROUP (which must
+be realized first), not to the child (which doesn't exist yet in `realized`).
+
+**`childToGroup` map** built in `realizeArrangement`:
+```javascript
+const childToGroup = {};
+for (const el of schema.elements) {
+  if (el.type === 'group' && el.children) {
+    for (const child of el.children) childToGroup[child.id] = el.id;
+  }
+}
+```
+
+**`topoSort` updated signature:**
+```javascript
+function topoSort(elements, childToGroup = {}) {
+  const resolveDep = id => childToGroup[id] ?? id;
+  const deps = Object.fromEntries(elements.map(e => [
+    e.id,
+    getDeps(e).map(resolveDep).filter(d => d !== e.id),
+  ]));
+  // ... DFS topo-sort unchanged
+}
+```
+
+This makes `anchor: "A"` behave as a dependency on `"g1"`, so `g1` is always realized
+before parking tries to look up `realized['A']`. After `g1` is realized, `realized['A']`
+is registered and parking finds it correctly.
+
+---
+
+### Phase D — Bug fixes
+
+**Bug 1: Parking clearance blocking parking zone**
+
+`realizeParking` anchors to a building. The building's clearance buffer had already been
+subtracted from `free` during building placement. This meant the 30 ft zone immediately
+in front of the building (the clearance strip) was cut from `free`, so parking clips
+produced a hole there.
+
+Fix: restore the anchor building's own clearance zone back into `free` before clipping
+parking, so parking is allowed to occupy that zone (it can share space with the clearance
+since it's directly adjacent to the building face):
+
+```javascript
+// In realizeParking:
+const anchorFoot = rectPoly(anchorEl.center_x_ft, anchorEl.center_y_ft,
+                            anchorEl.length_ft, anchorEl.width_ft,
+                            anchorEl.orientation_deg ?? 0, centroid);
+const anchorBuf  = turf.buffer(anchorFoot, clearanceFt, { units: 'feet' });
+const clearRing  = anchorBuf ? (turf.difference(anchorBuf, anchorFoot) ?? anchorBuf) : null;
+const freeForPark = clearRing ? (turf.union(free, clearRing) ?? free) : free;
+const clipped = turf.intersect(freeForPark, parkRect);
+```
+
+**Bug 2: Driveway falling outside parcel (vTarget below frontage)**
+
+Before the bSetbackFt fix, parking could be placed with its south edge below the parcel
+boundary (since vFront is the parcel edge, not free0's south edge). The driveway's
+`vTarget = targetBounds.vMin` (parking south edge) would then be below vFront, making
+the driveway rectangle entirely outside the parcel.
+
+Fix: clamp vTarget to always be at or above parcel frontage:
+```javascript
+// In realizeDriveway:
+const vFront  = frontageV(parcelFt, frame);
+const vTarget = Math.max(targetBounds.vMin, vFront + 1);
+```
+
+**Bug 3: Building set back too close — no room for parking**
+
+`placeBuilding` placed the building as close to the road as possible (setback = 20 ft).
+With the building only 20 ft in, the parking zone in front was only ~20 ft deep — far
+too shallow for the required stalls.
+
+Fix in `buildTestSchema`: pre-compute how deep the parking block will be and push the
+building back by exactly that amount so the parking fits perfectly between road and
+building front face:
+
+```javascript
+// In buildTestSchema:
+const firstB        = reqs.buildings[0];
+const firstArea     = firstB.length_ft * firstB.width_ft;
+const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
+const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
+const firstFace     = firstArea / firstDepth;
+const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
+const parkRows      = reqs.parking_stalls > 0
+                      ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
+const parkDepthFt   = parkRows * 30;   // 18 ft stall + 12 ft aisle/2 = 30 ft per row
+const bSetbackFt    = setbackFt + parkDepthFt;
+// bSetbackFt is passed as place.setbackFt for both individual buildings and groups.
+```
+
+**Example:** 50 stalls on a 150 ft wide first building:
+- stallsPerRow = floor(150/9) = 16
+- parkRows = ceil(50/16) = 4
+- parkDepthFt = 4 × 30 = 120 ft
+- bSetbackFt = 20 + 120 = 140 ft
+- Building front face lands at vFront + 140, giving exactly 120 ft of parking zone.
+
+---
+
+### Phase D — Updated `buildTestSchema`
+
+Single building → individual `building` element.
+Multiple buildings → `group` / `strip` element containing all buildings as children.
+Parking always anchors to the FIRST BUILDING (by label, e.g. `"A"`).
+
+```javascript
+function buildTestSchema(reqs, frontage, setbackFt) {
+  // Pre-compute parking depth to push building back enough for parking to fit.
+  const firstB        = reqs.buildings[0];
+  const firstArea     = firstB.length_ft * firstB.width_ft;
+  const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
+  const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
+  const firstFace     = firstArea / firstDepth;
+  const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
+  const parkRows      = reqs.parking_stalls > 0
+                        ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
+  const parkDepthFt   = parkRows * 30;
+  const bSetbackFt    = setbackFt + parkDepthFt;
+
+  let firstBuildingId;
+  const elements = [];
+
+  if (reqs.buildings.length === 1) {
+    const b  = reqs.buildings[0];
+    const id = b.label || 'b1';
+    firstBuildingId = id;
+    elements.push({
+      id, type: 'building',
+      size:  { areaSqFt: b.length_ft * b.width_ft,
+               maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+      place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU: 'center' },
+    });
+  } else {
+    // Multiple buildings → group strip; parking anchors to the first child.
+    firstBuildingId = reqs.buildings[0].label || 'b0';
+    elements.push({
+      id: 'g1', type: 'group', layout: 'strip', gapFt: 0,
+      place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt },
+      children: reqs.buildings.map((b, i) => ({
+        id:   b.label || `b${i}`,
+        size: { areaSqFt: b.length_ft * b.width_ft,
+                maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+      })),
+    });
+  }
+
+  if (reqs.parking_stalls > 0) {
+    elements.push({ id: 'p1', type: 'parking',
+      size: { stalls: reqs.parking_stalls },
+      place: { anchor: firstBuildingId, face: 'front' } });
+
+    if (reqs.driveways > 0) {
+      const count   = Math.min(reqs.driveways, 3);
+      const entryUs = count === 1 ? ['center']
+                    : count === 2 ? ['left', 'right']
+                    :               ['left', 'center', 'right'];
+      entryUs.forEach((entryU, i) => {
+        elements.push({ id: `d${i+1}`, type: 'driveway',
+          size: { widthFt: 24 },
+          place: { connects: 'parcelFrontage', to: 'p1', entryU } });
+      });
+    }
+  }
+
+  return { frontage, elements };
+}
+```
+
+---
+
+### Phase D — `onSolve` error handling
+
+Added try/catch around the entire arranger path so any JavaScript exception is shown
+in the status bar instead of leaving "Solving…" with a silent blank screen.
+After successful solve, status shows building count and any infeasibility warnings:
+
+```javascript
+if (USE_ARRANGER) {
+  try {
+    // ... build schema, realizeArrangement, layoutFromArrangement, renderLayout ...
+    const bCount  = layout.buildings.length;
+    const bTotal  = reqs.buildings.length;
+    const warnTxt = layout.warnings.length ? ' | ' + layout.warnings.join('; ') : '';
+    document.getElementById('status').textContent =
+      `${bCount} / ${bTotal} buildings placed${warnTxt}`;
+  } catch (err) {
+    console.error('[arrange] onSolve error:', err);
+    document.getElementById('status').textContent = 'Error: ' + err.message;
+  }
+  return;
 }
 ```
 
@@ -522,46 +903,15 @@ function layoutFromArrangement(elements) {
     detention_pond: null,
     warnings: elements.filter(e => !e.feasible)
                       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase C)',
+    rationale: 'realizeArrangement (Phase D)',
   };
 }
 ```
 
-### Test schema builder in main.js (`buildTestSchema`)
-```javascript
-function buildTestSchema(reqs, frontage, setbackFt) {
-  // Buildings: one per reqs.buildings entry, all anchored to parcelFrontage center
-  const buildingEls = reqs.buildings.map(b => ({
-    id:    b.label || 'b',
-    type:  'building',
-    size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-    place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
-  }));
-
-  const elements = [...buildingEls];
-
-  if (reqs.parking_stalls > 0 && buildingEls.length > 0) {
-    // Parking anchored to first building's front face
-    elements.push({ id: 'p1', type: 'parking',
-      size: { stalls: reqs.parking_stalls },
-      place: { anchor: buildingEls[0].id, face: 'front' } });
-
-    if (reqs.driveways > 0) {
-      // 1→center, 2→left+right, 3→left+center+right
-      const count   = Math.min(reqs.driveways, 3);
-      const entryUs = count === 1 ? ['center'] : count === 2 ? ['left', 'right']
-                                                              : ['left', 'center', 'right'];
-      entryUs.forEach((entryU, i) => {
-        elements.push({ id: `d${i+1}`, type: 'driveway',
-          size: { widthFt: 24 },
-          place: { connects: 'parcelFrontage', to: 'p1', entryU } });
-      });
-    }
-  }
-
-  return { frontage, elements };
-}
-```
+**IMPORTANT:** `layoutFromArrangement` filters for `e.type === 'building'`. Group child
+results are pushed into the top-level `results` array with `type: 'building'`, so they
+are picked up correctly. The parent group element (`type: 'group'`) is NOT included in
+the buildings list — only the children are.
 
 ### USE_ARRANGER flag
 `const USE_ARRANGER = true;` at top of main.js — **currently live**.
@@ -728,35 +1078,21 @@ background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.
 | A | Local frame, schema parser, topo-sort, building → parcelFrontage | ✅ Done |
 | B | parking → building face, stall-count sizing, clip-to-free | ✅ Done |
 | C | driveway connects frontage → parking, entryU left/center/right | ✅ Done |
-| D | group/strip: children laid along t̂, gapFt, child faces as anchors | ⬜ Next |
-| E | basin → parcelCorner, full feasibility flags, multi-element schemas | ⬜ |
+| D | group/strip: children along t̂, gapFt, child faces as anchors, scanGroupPlacement | ✅ Done |
+| E | basin → parcelCorner, full feasibility flags, multi-element schemas | ⬜ Next |
 
 ---
 
-## What's next: arrange.js Phase D
+## What's next: arrange.js Phase E
 
-**Phase D: `group` / `strip` — multiple buildings as a unit**
+**Phase E: basin + full feasibility + multi-element schemas**
 
-Schema element:
-```json
-{ "id": "g1", "type": "group", "layout": "strip",
-  "place": { "anchor": "parcelFrontage", "setbackFt": 25 },
-  "gapFt": 0,
-  "children": [
-    { "id": "b1", "size": { "areaSqFt": 8000 } },
-    { "id": "b2", "size": { "areaSqFt": 8000 } },
-    { "id": "b3", "size": { "areaSqFt": 8000 } }
-  ] }
-```
-
-Implementation notes from the spec:
-- `layout: "strip"` → children laid along t̂ with `gapFt` between them (0 = shared walls)
-- Group is placed as a unit first (its bounding box placed by `place`), then children
-  distributed inside along t̂
-- Each child's individual faces remain valid anchors (`anchor: "b2"`, `face: "front"`)
-- `realizeElement` handles `type: "group"` → `realizeGroup` which places each child and
-  adds them all to `realized` under their own IDs
-- The group bounding box is subtracted from `free` as a whole (with clearanceFt buffer)
+From the spec:
+- `basin` element type: `{ type: 'basin', size: { pctOfParcel: 0.08 }, place: { anchor: 'parcelCorner', corner: 'rearLeft' } }`
+- Wire `feasible: false` cases for all element types (oversized building → graceful failure, rest still render)
+- Test: full schema with building + group + parking + driveway + basin all in one schema
+- Test: force an oversized building → confirm `feasible: false` with valid output for feasible elements
+- Candidate: wrap parking (front + side), 2 driveways, gapFt > 0 for spacing between group children
 
 ---
 
@@ -769,6 +1105,7 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 
 ## Git log (recent)
 ```
+49a2606 blah  (← Phase D work; commit message is placeholder)
 fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
 8387ab0 Update SUMMARY.md with full session detail (scoring, optimizer, Phase A arrange)
 85b1a5e Add scoring, optimizer, and Phase A relational placement engine
@@ -780,3 +1117,35 @@ fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
 96d9b13 Wire aiHints.frontage through to solver in onSolve
 165e183 Add road frontage parameter (steps 1-3 + AI parsing)
 ```
+
+## Phase D — Known invariants and gotchas for future sessions
+
+- **`scanGroupPlacement` vs `placeBuilding`**: Groups MUST use `scanGroupPlacement`.
+  `placeBuilding` uses `reach = hypot(W,D)/2` isotropic erosion — for a 300×80 group
+  this is 155 ft, requiring 310 ft of parcel depth just for the legal zone. Typical
+  400-500 ft deep parcels barely fit or don't fit at all. `scanGroupPlacement` checks
+  direct polygon containment: only 40 ft N/S clearance needed for an 80 ft deep group.
+
+- **`bSetbackFt` must include parking depth**: Without this, the building is placed at
+  setback=20 ft and parking clips to only 20 ft, yielding almost no stalls. The formula
+  `bSetbackFt = setbackFt + parkRows × 30` pushes the building back so parking fits cleanly.
+
+- **Parking clearance must be restored before clipping**: `free` has the building's 30 ft
+  clearance already subtracted. Without the `turf.union(free, clearRing)` step in
+  `realizeParking`, the parking zone directly in front of the building is a hole.
+
+- **Children in `results` array have `type: 'building'`**: `layoutFromArrangement` filters
+  on `type === 'building'`. This works because each child pushed into `results` has
+  `type: 'building'`. The group element itself has `type: 'group'` and is NOT shown.
+
+- **`childToGroup` must be built before `topoSort`**: Anchoring parking to `"A"` (a group
+  child) must resolve to `"g1"` (the parent group) for topo-sort to order g1 before p1.
+  Without this, parking would be processed before the group, and `realized['A']` would
+  be undefined.
+
+- **`turf.union` availability**: The codebase imports turf as a global CDN bundle (6.5.0).
+  `turf.union` is available. Do NOT try to use ESM imports for turf — it's a global.
+
+- **`realizeArrangement` never throws**: All failures return `{ feasible: false, reason }`.
+  The try/catch in `onSolve` is a safety net for unexpected JS errors (e.g., from turf
+  on malformed geometry), not for expected infeasibility.

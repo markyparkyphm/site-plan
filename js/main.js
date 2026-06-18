@@ -164,24 +164,60 @@ async function onApplyAI() {
   }
 }
 
-// Build a minimal arrangement schema from current UI inputs (Phase B test path).
+// Build a minimal arrangement schema from current UI inputs.
+// One building → individual element anchored to parcelFrontage.
+// Multiple buildings → strip group (Phase D) so they're laid side-by-side along the frontage.
 function buildTestSchema(reqs, frontage, setbackFt) {
-  const buildingEls = reqs.buildings.map(b => ({
-    id:    b.label || 'b',
-    type:  'building',
-    size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-    place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
-  }));
+  const elements = [];
+  if (reqs.buildings.length === 0) return { frontage, elements };
 
-  const elements = [...buildingEls];
+  // Pre-compute the depth of parking that will sit between the road and the first building.
+  // This lets us push the building back far enough so parking actually fits in front of it.
+  const firstB        = reqs.buildings[0];
+  const firstArea     = firstB.length_ft * firstB.width_ft;
+  const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
+  const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
+  const firstFace     = firstArea / firstDepth;
+  const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
+  const parkRows      = reqs.parking_stalls > 0 ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
+  const parkDepthFt   = parkRows * 30;   // stallDepthFt(18) + aisleFt(24)/2 = 30 ft per row
+  // Building setback = UI setback + parking depth so there's room between road and building.
+  const bSetbackFt    = setbackFt + parkDepthFt;
+
+  let firstBuildingId;
+
+  if (reqs.buildings.length === 1) {
+    const b  = reqs.buildings[0];
+    const id = b.label || 'b1';
+    firstBuildingId = id;
+    elements.push({
+      id, type: 'building',
+      size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+      place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU: 'center' },
+    });
+  } else {
+    // Multiple buildings → group strip; parking anchors to the first child.
+    firstBuildingId = reqs.buildings[0].label || 'b0';
+    elements.push({
+      id:       'g1',
+      type:     'group',
+      layout:   'strip',
+      gapFt:    0,
+      place:    { anchor: 'parcelFrontage', setbackFt: bSetbackFt },
+      children: reqs.buildings.map((b, i) => ({
+        id:   b.label || `b${i}`,
+        size: { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+      })),
+    });
+  }
 
   // Anchor parking to the first building's front face when stalls are requested.
-  if (reqs.parking_stalls > 0 && buildingEls.length > 0) {
+  if (reqs.parking_stalls > 0) {
     elements.push({
       id:    'p1',
       type:  'parking',
       size:  { stalls: reqs.parking_stalls },
-      place: { anchor: buildingEls[0].id, face: 'front' },
+      place: { anchor: firstBuildingId, face: 'front' },
     });
 
     // Add driveways connecting parcelFrontage to the parking block.
@@ -227,7 +263,7 @@ function layoutFromArrangement(elements) {
     warnings: elements
       .filter(e => !e.feasible)
       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase C)',
+    rationale: 'realizeArrangement (Phase D)',
   };
 }
 
@@ -246,16 +282,26 @@ function onSolve() {
   document.getElementById('status').textContent = 'Solving…';
 
   if (USE_ARRANGER) {
-    const reqs = getReqs();
-    const frontageVal = document.getElementById('input-frontage').value;
-    const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
-    const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
-    const schema = buildTestSchema(reqs, frontage, setbackFt);
-    const { elements } = realizeArrangement(schema, parcelLatLng, PROFILES.retail);
-    const layout = layoutFromArrangement(elements);
-    lastLayout = layout;
-    renderLayout(layout, reqs, true, frontage);
-    document.getElementById('btn-render').disabled = false;
+    try {
+      const reqs = getReqs();
+      const frontageVal = document.getElementById('input-frontage').value;
+      const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
+      const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
+      const schema = buildTestSchema(reqs, frontage, setbackFt);
+      const { elements } = realizeArrangement(schema, parcelLatLng, PROFILES.retail);
+      const layout = layoutFromArrangement(elements);
+      lastLayout = layout;
+      renderLayout(layout, reqs, true, frontage);
+      document.getElementById('btn-render').disabled = false;
+      const bCount  = layout.buildings.length;
+      const bTotal  = reqs.buildings.length;
+      const warnTxt = layout.warnings.length ? ' | ' + layout.warnings.join('; ') : '';
+      document.getElementById('status').textContent =
+        `${bCount} / ${bTotal} buildings placed${warnTxt}`;
+    } catch (err) {
+      console.error('[arrange] onSolve error:', err);
+      document.getElementById('status').textContent = 'Error: ' + err.message;
+    }
     return;
   }
 
