@@ -7,8 +7,8 @@
 // Buildings must stay rectangular → erode-and-fit (no clipping).
 // Parking / driveway / basin tolerate clipping → place-then-clip.
 
-import { placeBuilding } from './solver.js';
-import { computeCentroid, latLngToFeet, latLngToFeetFromCentroid, feetToLatLngFromCentroid } from './projection.js';
+import { placeBuilding, growCornerClip } from './solver.js';
+import { computeCentroid, latLngToFeet, latLngToFeetFromCentroid, feetToLatLngFromCentroid, polygonAreaSqFt } from './projection.js';
 import { toPoly, rectPoly } from './geometry.js';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,16 @@ function frontageV(parcelFt, frame) {
 // ---------------------------------------------------------------------------
 
 const PARCEL_ANCHORS = new Set(['parcelFrontage', 'parcelCorner']);
+
+// Maps semantic corner names (relative to frontage) → geographic cardinal for growCornerClip.
+// rear = away from road (high v), front = near road (low v), left = −t̂, right = +t̂
+const CORNER_TO_CARDINAL = {
+  S: { rearLeft: 'NW', rearRight: 'NE', frontLeft: 'SW', frontRight: 'SE' },
+  N: { rearLeft: 'SW', rearRight: 'SE', frontLeft: 'NW', frontRight: 'NE' },
+  E: { rearLeft: 'SW', rearRight: 'NW', frontLeft: 'SE', frontRight: 'NE' },
+  W: { rearLeft: 'SE', rearRight: 'NE', frontLeft: 'SW', frontRight: 'NW' },
+};
+const CARDINAL_CORNERS = new Set(['SW', 'SE', 'NW', 'NE']);
 
 function getDeps(element) {
   const p = element.place ?? {};
@@ -453,6 +463,51 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   };
 }
 
+// Phase E — place a detention basin clipped from a parcel corner.
+// anchor: 'parcelCorner', corner: 'rearLeft'|'rearRight'|'frontLeft'|'frontRight'
+//   OR a literal cardinal 'SW'|'SE'|'NW'|'NE' (passed through from the UI dropdown).
+function realizeBasin(el, free, parcelFt, centroid, frontage) {
+  const place = el.place ?? {};
+  const size  = el.size  ?? {};
+  const anchor = place.anchor ?? 'parcelCorner';
+
+  if (anchor !== 'parcelCorner') {
+    return { id: el.id, type: 'basin', feasible: false,
+             reason: `anchor '${anchor}' not supported (Phase E: parcelCorner only)` };
+  }
+
+  const cornerName = place.corner ?? 'rearRight';
+  let cardinal;
+  if (CARDINAL_CORNERS.has(cornerName)) {
+    cardinal = cornerName;
+  } else {
+    cardinal = (CORNER_TO_CARDINAL[frontage] ?? CORNER_TO_CARDINAL.S)[cornerName];
+    if (!cardinal) {
+      return { id: el.id, type: 'basin', feasible: false,
+               reason: `Unknown corner '${cornerName}'` };
+    }
+  }
+
+  const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
+  const pctOfParcel    = size.pctOfParcel ?? 0.08;
+  const targetSqFt     = size.sqFt ?? (pctOfParcel * parcelAreaSqFt);
+
+  const clipped = growCornerClip(free, cardinal, targetSqFt, centroid);
+  if (!clipped) {
+    return { id: el.id, type: 'basin', feasible: false,
+             reason: 'Could not fit basin in corner' };
+  }
+
+  const actualSqFt = turf.area(clipped) * 10.7639;
+  if (actualSqFt < targetSqFt * 0.5) {
+    return { id: el.id, type: 'basin', feasible: false,
+             reason: `Basin undersized: got ${Math.round(actualSqFt).toLocaleString()} sq ft, ` +
+                     `target ${Math.round(targetSqFt).toLocaleString()} sq ft` };
+  }
+
+  return { id: el.id, type: 'basin', feasible: true, feature: clipped };
+}
+
 function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
   const place = el.place ?? {};
   const size  = el.size  ?? {};
@@ -519,15 +574,15 @@ function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
   };
 }
 
-function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
+function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized, frontage) {
   if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
   if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
   if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
   if (el.type === 'group')    return realizeGroup(el, free, parcelFt, frame, centroid, profile);
-  // Phase E+ types
+  if (el.type === 'basin')    return realizeBasin(el, free, parcelFt, centroid, frontage);
   return {
     id: el.id, type: el.type, feasible: false,
-    reason: `${el.type} not implemented (Phase D: building + parking + driveway + group)`,
+    reason: `${el.type} not implemented`,
   };
 }
 
@@ -587,7 +642,7 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
     const el = elementMap[id];
     if (!el) continue;
 
-    const result = realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized);
+    const result = realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized, frontage);
     realized[id] = result;
     results.push(result);
 
@@ -622,6 +677,10 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
     } else if (result.feasible && result.type === 'driveway') {
       // Driveways: subtract with a small buffer so buildings don't land in the lane.
       const buf = turf.buffer(result.feature, 3, { units: 'feet' });
+      if (buf) free = turf.difference(free, buf) ?? free;
+    } else if (result.feasible && result.type === 'basin') {
+      // Basin: subtract with 5 ft buffer, matching solver.js.
+      const buf = turf.buffer(result.feature, 5, { units: 'feet' });
       if (buf) free = turf.difference(free, buf) ?? free;
     }
   }

@@ -167,7 +167,7 @@ async function onApplyAI() {
 // Build a minimal arrangement schema from current UI inputs.
 // One building → individual element anchored to parcelFrontage.
 // Multiple buildings → strip group (Phase D) so they're laid side-by-side along the frontage.
-function buildTestSchema(reqs, frontage, setbackFt) {
+function buildTestSchema(reqs, frontage, setbackFt, basinCorner) {
   const elements = [];
   if (reqs.buildings.length === 0) return { frontage, elements };
 
@@ -237,6 +237,16 @@ function buildTestSchema(reqs, frontage, setbackFt) {
     }
   }
 
+  // Basin in the rear corner when a pond percentage is set.
+  if (reqs.pondPct > 0) {
+    elements.push({
+      id:    'bn1',
+      type:  'basin',
+      size:  { pctOfParcel: reqs.pondPct / 100 },
+      place: { anchor: 'parcelCorner', corner: basinCorner || 'NE' },
+    });
+  }
+
   return { frontage, elements };
 }
 
@@ -259,17 +269,18 @@ function layoutFromArrangement(elements) {
     driveways: elements
       .filter(e => e.type === 'driveway' && e.feasible)
       .map(e => e.feature),
-    detention_pond: null,
+    detention_pond: elements.find(e => e.type === 'basin' && e.feasible)?.feature ?? null,
     warnings: elements
       .filter(e => !e.feasible)
       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase D)',
+    rationale: 'realizeArrangement (Phase E)',
   };
 }
 
 function getReqs() {
+  const pondPctVal = parseFloat(document.getElementById('input-pond-pct').value);
   return {
-    pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,
+    pondPct:        isNaN(pondPctVal) ? 15 : pondPctVal,
     buildings:      getBuildings(),
     parking_stalls: parseInt(document.getElementById('input-parking').value) || 0,
     driveways:      parseInt(document.getElementById('input-driveways').value) || 0,
@@ -287,7 +298,8 @@ function onSolve() {
       const frontageVal = document.getElementById('input-frontage').value;
       const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
       const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
-      const schema = buildTestSchema(reqs, frontage, setbackFt);
+      const basinCorner = document.getElementById('input-basin-corner').value;
+      const schema = buildTestSchema(reqs, frontage, setbackFt, basinCorner);
       const { elements } = realizeArrangement(schema, parcelLatLng, PROFILES.retail);
       const layout = layoutFromArrangement(elements);
       lastLayout = layout;

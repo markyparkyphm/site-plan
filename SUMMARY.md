@@ -59,6 +59,7 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | arrange.js Phase C: driveway connects parcelFrontage → parking, entryU | js/arrange.js | fd55d90 | ✅ |
 | USE_ARRANGER = true (arranger is live for Solve button) | js/main.js | fd55d90 | ✅ |
 | arrange.js Phase D: group/strip, childToGroup topo-sort, scanGroupPlacement, parking clearance fix, driveway vTarget fix, bSetbackFt, error handling | js/arrange.js + js/main.js | 49a2606 | ✅ |
+| arrange.js Phase E: basin → parcelCorner, semantic corner names, cardinal passthrough, full schema round-trip | js/arrange.js + js/main.js + js/solver.js | — | ✅ |
 
 ---
 
@@ -1079,7 +1080,7 @@ background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.
 | B | parking → building face, stall-count sizing, clip-to-free | ✅ Done |
 | C | driveway connects frontage → parking, entryU left/center/right | ✅ Done |
 | D | group/strip: children along t̂, gapFt, child faces as anchors, scanGroupPlacement | ✅ Done |
-| E | basin → parcelCorner, full feasibility flags, multi-element schemas | ⬜ Next |
+| E | basin → parcelCorner, semantic + cardinal corners, full schema round-trip | ✅ Done |
 
 ---
 

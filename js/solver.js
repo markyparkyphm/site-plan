@@ -95,7 +95,7 @@ export function solveLayout(parcelLatLng, reqs, hints) {
 }
 
 // Binary-search a clip rectangle from the given corner until area ≈ target
-function growCornerClip(buildable, corner, targetSqFt, centroid) {
+export function growCornerClip(buildable, corner, targetSqFt, centroid) {
   const [minLng, minLat, maxLng, maxLat] = turf.bbox(buildable);
 
   const anchorLng = corner.includes('E') ? maxLng : minLng;
