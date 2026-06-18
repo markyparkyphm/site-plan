@@ -11,7 +11,7 @@ import { realizeArrangement } from './arrange.js';
 
 // Phase A flag: set true to route onSolve through realizeArrangement for testing.
 // The existing solver path (solveLayout → optimizeLayout) is unchanged when false.
-const USE_ARRANGER = false;
+const USE_ARRANGER = true;
 
 const TERM_LABELS = {
   buildingsPlaced: 'Buildings placed',
@@ -164,21 +164,47 @@ async function onApplyAI() {
   }
 }
 
-// Build a minimal arrangement schema from current UI inputs (Phase A test path).
+// Build a minimal arrangement schema from current UI inputs (Phase B test path).
 function buildTestSchema(reqs, frontage, setbackFt) {
-  return {
-    frontage,
-    elements: reqs.buildings.map(b => ({
-      id:    b.label || 'b',
-      type:  'building',
-      size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-      place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
-    })),
-  };
+  const buildingEls = reqs.buildings.map(b => ({
+    id:    b.label || 'b',
+    type:  'building',
+    size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+    place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
+  }));
+
+  const elements = [...buildingEls];
+
+  // Anchor parking to the first building's front face when stalls are requested.
+  if (reqs.parking_stalls > 0 && buildingEls.length > 0) {
+    elements.push({
+      id:    'p1',
+      type:  'parking',
+      size:  { stalls: reqs.parking_stalls },
+      place: { anchor: buildingEls[0].id, face: 'front' },
+    });
+
+    // Add driveways connecting parcelFrontage to the parking block.
+    if (reqs.driveways > 0) {
+      const count   = Math.min(reqs.driveways, 3);
+      const entryUs = count === 1 ? ['center']
+                    : count === 2 ? ['left', 'right']
+                    :               ['left', 'center', 'right'];
+      entryUs.forEach((entryU, i) => {
+        elements.push({
+          id:    `d${i + 1}`,
+          type:  'driveway',
+          size:  { widthFt: 24 },
+          place: { connects: 'parcelFrontage', to: 'p1', entryU },
+        });
+      });
+    }
+  }
+
+  return { frontage, elements };
 }
 
 // Convert realizeArrangement output to the layout shape render.js and score.js expect.
-// Parking / driveways / basin are empty in Phase A (those elements return feasible:false).
 function layoutFromArrangement(elements) {
   return {
     buildings: elements
@@ -191,13 +217,17 @@ function layoutFromArrangement(elements) {
         center_y_ft:     e.center_y_ft,
         orientation_deg: e.orientation_deg ?? 0,
       })),
-    parking_areas: [],
-    driveways:     [],
+    parking_areas: elements
+      .filter(e => e.type === 'parking' && e.feasible)
+      .map(e => e.feature),
+    driveways: elements
+      .filter(e => e.type === 'driveway' && e.feasible)
+      .map(e => e.feature),
     detention_pond: null,
     warnings: elements
       .filter(e => !e.feasible)
       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase A)',
+    rationale: 'realizeArrangement (Phase C)',
   };
 }
 

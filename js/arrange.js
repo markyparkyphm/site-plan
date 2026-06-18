@@ -1,14 +1,14 @@
-// Relational placement engine — Phase A: local frame, schema parser, topo-sort,
-// and realizing a single building anchored to parcelFrontage.
+// Relational placement engine — Phase B: local frame, schema parser, topo-sort,
+// building → parcelFrontage, and parking → building face.
 //
 // Entry point: realizeArrangement(schema, parcelLngLat, profile)
 // Returns: { elements: [{id, type, feasible, reason?, ...geomFields}], freeRemaining }
 //
 // Buildings must stay rectangular → erode-and-fit (no clipping).
-// Parking / driveway / basin tolerate clipping → Phase B+ implements them.
+// Parking / driveway / basin tolerate clipping → place-then-clip.
 
 import { placeBuilding } from './solver.js';
-import { computeCentroid, latLngToFeet } from './projection.js';
+import { computeCentroid, latLngToFeet, latLngToFeetFromCentroid, feetToLatLngFromCentroid } from './projection.js';
 import { toPoly, rectPoly } from './geometry.js';
 
 // ---------------------------------------------------------------------------
@@ -90,8 +90,202 @@ function topoSort(elements) {
 }
 
 // ---------------------------------------------------------------------------
-// Element realizers (Phase A: building → parcelFrontage only)
+// Element realizers (Phase C: building → parcelFrontage, parking → building face,
+//                             driveway connects parcelFrontage → parking)
 // ---------------------------------------------------------------------------
+
+// Compute a building's (uMin, uMax, vMin, vMax) in local frame from its placed geometry.
+// vMin = front face (closest to road), vMax = rear face.
+function buildingLocalBounds(b, frame) {
+  const rad = (b.orientation_deg ?? 0) * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  const hl = b.length_ft / 2, hw = b.width_ft / 2;
+  const cx = b.center_x_ft, cy = b.center_y_ft;
+  const cornersFt = [
+    { x: cx - hl*cos + hw*sin, y: cy - hl*sin - hw*cos },
+    { x: cx + hl*cos + hw*sin, y: cy + hl*sin - hw*cos },
+    { x: cx + hl*cos - hw*sin, y: cy + hl*sin + hw*cos },
+    { x: cx - hl*cos - hw*sin, y: cy - hl*sin + hw*cos },
+  ];
+  const local = cornersFt.map(p => feetToLocal(p, frame));
+  return {
+    uMin: Math.min(...local.map(p => p.u)),
+    uMax: Math.max(...local.map(p => p.u)),
+    vMin: Math.min(...local.map(p => p.v)),
+    vMax: Math.max(...local.map(p => p.v)),
+  };
+}
+
+// Return local-frame bounds for any realized element.
+// Parking stores exact pre-clip bounds in localBounds; buildings use corner math;
+// other clippable types fall back to bbox approximation.
+function elementLocalBounds(el, frame, centroid) {
+  if (el.localBounds) {
+    return { uMin: el.localBounds.uMin, uMax: el.localBounds.uMax,
+             vMin: el.localBounds.vMin, vMax: el.localBounds.vMax };
+  }
+  if (el.type === 'building') return buildingLocalBounds(el, frame);
+  if (el.feature) {
+    const [minLng, minLat, maxLng, maxLat] = turf.bbox(el.feature);
+    const corners = [
+      { lat: minLat, lng: minLng }, { lat: minLat, lng: maxLng },
+      { lat: maxLat, lng: minLng }, { lat: maxLat, lng: maxLng },
+    ].map(ll => feetToLocal(latLngToFeetFromCentroid(ll, centroid), frame));
+    return {
+      uMin: Math.min(...corners.map(p => p.u)), uMax: Math.max(...corners.map(p => p.u)),
+      vMin: Math.min(...corners.map(p => p.v)), vMax: Math.max(...corners.map(p => p.v)),
+    };
+  }
+  return null;
+}
+
+function realizeParking(el, free, parcelFt, frame, centroid, profile, realized) {
+  const place = el.place ?? {};
+  const size  = el.size  ?? {};
+  const anchorId = place.anchor;
+  const face     = place.face ?? 'front';
+
+  if (!anchorId || PARCEL_ANCHORS.has(anchorId)) {
+    return { id: el.id, type: 'parking', feasible: false,
+             reason: 'parking requires an element anchor (e.g., anchor: "b1")' };
+  }
+  const anchorEl = realized[anchorId];
+  if (!anchorEl) {
+    return { id: el.id, type: 'parking', feasible: false,
+             reason: `anchor '${anchorId}' not found` };
+  }
+  if (!anchorEl.feasible) {
+    return { id: el.id, type: 'parking', feasible: false,
+             reason: `anchor '${anchorId}' is infeasible` };
+  }
+
+  // Get building's local-frame bounds; front face = vMin (closest to road).
+  const ab     = buildingLocalBounds(anchorEl, frame);
+  const faceFt = ab.uMax - ab.uMin;
+  const vFace  = face === 'rear' ? ab.vMax : ab.vMin;
+
+  // Size depth from stall target.
+  // One row = stallDepthFt stalls + aisleFt/2 (half-aisle shared with the next row).
+  const targetStalls    = size.stalls ?? 20;
+  const stallSpacingFt  = 9;
+  const stallRowDepthFt = (profile.stallDepthFt ?? 18) + (profile.aisleFt ?? 24) / 2;
+  const stallsPerRow    = Math.max(1, Math.floor(faceFt / stallSpacingFt));
+  const rows            = Math.ceil(targetStalls / stallsPerRow);
+  const depthFt         = rows * stallRowDepthFt;
+
+  // Parking extends from building face toward frontage ('front') or rearward ('rear').
+  // front: vNear = vFace - depthFt (smaller v = closer to road)
+  const vNear = face === 'rear' ? vFace           : vFace - depthFt;
+  const vFar  = face === 'rear' ? vFace + depthFt : vFace;
+
+  // Unproject local rectangle corners to WGS84.
+  const ring = [
+    [ab.uMin, vNear], [ab.uMax, vNear],
+    [ab.uMax, vFar],  [ab.uMin, vFar],
+    [ab.uMin, vNear],
+  ].map(([u, v]) => {
+    const ft = localToFeet(u, v, frame);
+    const ll = feetToLatLngFromCentroid(ft, centroid);
+    return [ll.lng, ll.lat];
+  });
+  const parkRect = turf.polygon([ring]);
+
+  // Clip to free — parking tolerates partial coverage.
+  const clipped = turf.intersect(free, parkRect);
+  if (!clipped) {
+    return { id: el.id, type: 'parking', feasible: false, reason: 'No overlap with free space' };
+  }
+  const actualSqFt = turf.area(clipped) * 10.7639;
+  if (actualSqFt < (profile.minBuildingAreaSqFt ?? 400)) {
+    return { id: el.id, type: 'parking', feasible: false,
+             reason: `Parking too small after clipping (${Math.round(actualSqFt)} sq ft)` };
+  }
+
+  const actualStalls = Math.floor(actualSqFt / 325);
+  const [cMinLng, cMinLat, cMaxLng, cMaxLat] = turf.bbox(clipped);
+  const cFt = latLngToFeetFromCentroid(
+    { lat: (cMinLat + cMaxLat) / 2, lng: (cMinLng + cMaxLng) / 2 }, centroid
+  );
+  clipped.properties = {
+    center_x_ft: cFt.x, center_y_ft: cFt.y,
+    orientation_deg: 0, stall_count: actualStalls,
+  };
+
+  return {
+    id: el.id, type: 'parking', feasible: true,
+    feature: clipped, stall_count: actualStalls,
+    // Store exact pre-clip local bounds so driveway placement is accurate.
+    localBounds: { uMin: ab.uMin, uMax: ab.uMax, vMin: vNear, vMax: vFar },
+  };
+}
+
+function realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized) {
+  const place = el.place ?? {};
+  const size  = el.size  ?? {};
+
+  const connectsTo = place.connects ?? 'parcelFrontage';
+  const toId       = place.to;
+  const entryU     = place.entryU ?? 'center';
+  const halfWidth  = (size.widthFt ?? profile.drivewayWidthFt ?? 24) / 2;
+
+  if (connectsTo !== 'parcelFrontage') {
+    return { id: el.id, type: 'driveway', feasible: false,
+             reason: `connects '${connectsTo}' not supported (Phase C: parcelFrontage only)` };
+  }
+
+  // Resolve target element bounds
+  let targetBounds;
+  if (toId && !PARCEL_ANCHORS.has(toId)) {
+    const targetEl = realized[toId];
+    if (!targetEl || !targetEl.feasible) {
+      return { id: el.id, type: 'driveway', feasible: false,
+               reason: `target '${toId}' is not realized or infeasible` };
+    }
+    targetBounds = elementLocalBounds(targetEl, frame, centroid);
+    if (!targetBounds) {
+      return { id: el.id, type: 'driveway', feasible: false,
+               reason: `cannot compute local bounds for target '${toId}'` };
+    }
+  } else {
+    const us = parcelFt.map(p => feetToLocal(p, frame).u);
+    const vFront = frontageV(parcelFt, frame);
+    targetBounds = { uMin: Math.min(...us), uMax: Math.max(...us), vMin: vFront, vMax: vFront };
+  }
+
+  // u-center of the driveway, aligned to the target's u-extent
+  let uCenter;
+  switch (entryU) {
+    case 'left':  uCenter = targetBounds.uMin + halfWidth; break;
+    case 'right': uCenter = targetBounds.uMax - halfWidth; break;
+    default:      uCenter = (targetBounds.uMin + targetBounds.uMax) / 2; break;
+  }
+
+  // v range: from the parcel frontage edge (with a 50 ft over-extension so the clip
+  // to parcel trims it exactly to the boundary) down to the target's near edge.
+  const vFront  = frontageV(parcelFt, frame);
+  const vTarget = targetBounds.vMin;
+
+  const ring = [
+    [uCenter - halfWidth, vFront - 50],
+    [uCenter + halfWidth, vFront - 50],
+    [uCenter + halfWidth, vTarget],
+    [uCenter - halfWidth, vTarget],
+    [uCenter - halfWidth, vFront - 50],
+  ].map(([u, v]) => {
+    const ft = localToFeet(u, v, frame);
+    const ll = feetToLatLngFromCentroid(ft, centroid);
+    return [ll.lng, ll.lat];
+  });
+  const dwRect = turf.polygon([ring]);
+
+  // Clip to parcel (not free — driveways pass through the setback zone below parking).
+  const clipped = turf.intersect(parcelTurf, dwRect);
+  if (!clipped) {
+    return { id: el.id, type: 'driveway', feasible: false, reason: 'No overlap with parcel' };
+  }
+
+  return { id: el.id, type: 'driveway', feasible: true, feature: clipped };
+}
 
 function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
   const place = el.place ?? {};
@@ -159,14 +353,14 @@ function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
   };
 }
 
-function realizeElement(el, free, parcelFt, frame, centroid, profile, _realized) {
-  if (el.type === 'building') {
-    return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
-  }
-  // Phase B+ types
+function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
+  if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
+  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
+  if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
+  // Phase D+ types
   return {
     id: el.id, type: el.type, feasible: false,
-    reason: `${el.type} not implemented (Phase A: building only)`,
+    reason: `${el.type} not implemented (Phase C: building + parking + driveway only)`,
   };
 }
 
@@ -217,18 +411,27 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
     const el = elementMap[id];
     if (!el) continue;
 
-    const result = realizeElement(el, free, parcelFt, frame, centroid, profile, realized);
+    const result = realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized);
     realized[id] = result;
     results.push(result);
 
-    // Subtract placed building footprint + clearance from free (mirrors solveLayout step 5).
+    // Subtract placed footprint from free.
     if (result.feasible && result.type === 'building') {
+      // Buildings: subtract footprint + clearance buffer (mirrors solveLayout step 5).
       const foot = rectPoly(
         result.center_x_ft, result.center_y_ft,
         result.length_ft, result.width_ft,
         result.orientation_deg, centroid
       );
       const buf = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
+      if (buf) free = turf.difference(free, buf) ?? free;
+    } else if (result.feasible && result.type === 'parking') {
+      // Parking: subtract clipped footprint + small gap buffer.
+      const buf = turf.buffer(result.feature, profile.gapFt ?? 10, { units: 'feet' });
+      if (buf) free = turf.difference(free, buf) ?? free;
+    } else if (result.feasible && result.type === 'driveway') {
+      // Driveways: subtract with a small buffer so buildings don't land in the lane.
+      const buf = turf.buffer(result.feature, 3, { units: 'feet' });
       if (buf) free = turf.difference(free, buf) ?? free;
     }
   }
