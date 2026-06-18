@@ -71,32 +71,16 @@ export function solveLayout(parcelLatLng, reqs, hints) {
   const placedBuildings = [];
 
   buildings.forEach((b, i) => {
-    let placed = null;
-
-    for (const deg of orientations) {
-      const r = reach(b.length_ft, b.width_ft);
-      const legal = turf.buffer(free, -r, { units: 'feet' });
-      if (!legal) continue;
-
-      const cands = gridPointsInside(legal, 10, centroid);
-      if (cands.length === 0) continue;
-
-      const target = zoneCentroid(parcelLatLng, i, N, centroid);
-      cands.sort((a, b) => dist2(a, target) - dist2(b, target) || a.y - b.y || a.x - b.x);
-
-      const c = cands[0];
-      placed = { ...b, center_x_ft: c.x, center_y_ft: c.y, orientation_deg: deg };
-
-      const foot = rectPoly(c.x, c.y, b.length_ft, b.width_ft, deg, centroid);
-      const footBuf = turf.buffer(foot, clearance, { units: 'feet' });
-      if (footBuf) free = turf.difference(free, footBuf) ?? free;
-      break;
-    }
+    const target = zoneCentroid(parcelLatLng, i, N, centroid);
+    const placed = placeBuilding(free, b, target, orientations, centroid);
 
     if (!placed) {
       warnings.push(`${b.label} (${b.length_ft}×${b.width_ft} ft) does not fit.`);
     } else {
       placedBuildings.push(placed);
+      const foot = rectPoly(placed.center_x_ft, placed.center_y_ft, placed.length_ft, placed.width_ft, placed.orientation_deg, centroid);
+      const footBuf = turf.buffer(foot, clearance, { units: 'feet' });
+      if (footBuf) free = turf.difference(free, footBuf) ?? free;
     }
   });
 
@@ -378,6 +362,22 @@ function sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s) {
     else              result = Math.min(result, bb[3]); // southernmost north edge
   }
   return isFinite(result) ? result : null;
+}
+
+// Erode free space by building reach, find the candidate grid point closest to targetPt.
+// Returns {…bSpec, center_x_ft, center_y_ft, orientation_deg} or null.
+// The caller is responsible for subtracting the footprint + clearance from free.
+export function placeBuilding(free, bSpec, targetPt, orientations, centroid) {
+  for (const deg of orientations) {
+    const r = reach(bSpec.length_ft, bSpec.width_ft);
+    const legal = turf.buffer(free, -r, { units: 'feet' });
+    if (!legal) continue;
+    const cands = gridPointsInside(legal, 10, centroid);
+    if (cands.length === 0) continue;
+    cands.sort((a, b) => dist2(a, targetPt) - dist2(b, targetPt) || a.y - b.y || a.x - b.x);
+    return { ...bSpec, center_x_ft: cands[0].x, center_y_ft: cands[0].y, orientation_deg: deg };
+  }
+  return null;
 }
 
 function infeasible(reason) {

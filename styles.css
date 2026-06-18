@@ -125,6 +125,36 @@ button {
 #btn-solve:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
 #btn-solve:not(:disabled):hover { opacity: 0.85; }
 
+#btn-optimize { background: #0e7490; color: #fff; }
+#btn-optimize:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+#btn-optimize:not(:disabled):hover { opacity: 0.85; }
+
+#optimizer-panel { display: flex; flex-direction: column; gap: 4px; }
+.opt-winner-label { font-size: 0.78rem; color: #4ade80; font-weight: 600; margin-bottom: 2px; }
+
+.opt-candidate {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 4px;
+  font-size: 0.74rem;
+  align-items: baseline;
+  padding: 3px 6px;
+  border-radius: 3px;
+  border-left: 2px solid transparent;
+  color: #6b7280;
+}
+.opt-candidate-winner {
+  background: rgba(74, 222, 128, 0.07);
+  border-left-color: #4ade80;
+  color: #d1d5db;
+}
+.opt-rank { font-size: 0.68rem; }
+.opt-candidate-winner .opt-rank { color: #4ade80; font-weight: 700; }
+.opt-params { }
+.opt-score { font-weight: 600; text-align: right; }
+.opt-candidate-winner .opt-score { color: #4ade80; }
+.opt-unplaced { font-size: 0.68rem; color: #f87171; grid-column: 2 / -1; }
+
 #status { font-size: 0.8rem; color: #6b7280; }
 
 #stats-panel { display: flex; flex-direction: column; gap: 5px; }
@@ -136,6 +166,24 @@ button {
 }
 .stat-label { color: #6b7280; }
 .stat-row span:last-child { color: #e5e7eb; font-weight: 500; text-align: right; }
+
+#score-panel { display: flex; flex-direction: column; gap: 4px; }
+#score-total { color: #4ade80 !important; font-weight: 700 !important; }
+
+.score-term {
+  display: grid;
+  grid-template-columns: 1fr 34px 44px;
+  gap: 2px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  align-items: baseline;
+}
+.score-term-name { color: #9ca3af; }
+.score-term-raw  { color: #6b7280; text-align: right; }
+.score-term-contrib { text-align: right; font-weight: 600; }
+.score-pos  { color: #4ade80; }
+.score-neg  { color: #f87171; }
+.score-zero { color: #4b5563; }
 
 #warnings-panel { display: flex; flex-direction: column; gap: 4px; }
 

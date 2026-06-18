@@ -5,6 +5,25 @@ import { solveLayout } from './solver.js';
 import { renderLayoutOnCanvas } from './render.js';
 import { exportToPng } from './export.js';
 import { parseInstructions } from './ai.js';
+import { score, PROFILES } from './score.js';
+import { optimizeLayout } from './optimize.js';
+import { realizeArrangement } from './arrange.js';
+
+// Phase A flag: set true to route onSolve through realizeArrangement for testing.
+// The existing solver path (solveLayout → optimizeLayout) is unchanged when false.
+const USE_ARRANGER = false;
+
+const TERM_LABELS = {
+  buildingsPlaced: 'Buildings placed',
+  parkingMet:      'Parking met',
+  parkingInFront:  'Parking in front',
+  roadVisibility:  'Road visibility',
+  coverageTarget:  'Coverage',
+  accessQuality:   'Access (penalty)',
+  basinAccuracy:   'Basin accuracy',
+  compactness:     'Compactness',
+  openSpace:       'Open space',
+};
 
 export let parcelLatLng = [];
 export let parcelFt = [];
@@ -28,6 +47,7 @@ export function init() {
     document.getElementById('canvas-panel').style.display = 'none';
   });
   document.getElementById('btn-ai-apply').addEventListener('click', onApplyAI);
+  document.getElementById('btn-optimize').addEventListener('click', onOptimize);
 }
 
 function addBuildingRow() {
@@ -68,6 +88,7 @@ function onBoundaryClosed(pts) {
 
 function onUseBoundary() {
   document.getElementById('btn-solve').disabled = false;
+  document.getElementById('btn-optimize').disabled = false;
   document.getElementById('status').textContent = 'Boundary confirmed. Fill in the program and click "Solve Layout".';
 }
 
@@ -143,9 +164,70 @@ async function onApplyAI() {
   }
 }
 
+// Build a minimal arrangement schema from current UI inputs (Phase A test path).
+function buildTestSchema(reqs, frontage, setbackFt) {
+  return {
+    frontage,
+    elements: reqs.buildings.map(b => ({
+      id:    b.label || 'b',
+      type:  'building',
+      size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+      place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
+    })),
+  };
+}
+
+// Convert realizeArrangement output to the layout shape render.js and score.js expect.
+// Parking / driveways / basin are empty in Phase A (those elements return feasible:false).
+function layoutFromArrangement(elements) {
+  return {
+    buildings: elements
+      .filter(e => e.type === 'building' && e.feasible)
+      .map(e => ({
+        label:           e.label ?? e.id,
+        length_ft:       e.length_ft,
+        width_ft:        e.width_ft,
+        center_x_ft:     e.center_x_ft,
+        center_y_ft:     e.center_y_ft,
+        orientation_deg: e.orientation_deg ?? 0,
+      })),
+    parking_areas: [],
+    driveways:     [],
+    detention_pond: null,
+    warnings: elements
+      .filter(e => !e.feasible)
+      .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
+    rationale: 'realizeArrangement (Phase A)',
+  };
+}
+
+function getReqs() {
+  return {
+    pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,
+    buildings:      getBuildings(),
+    parking_stalls: parseInt(document.getElementById('input-parking').value) || 0,
+    driveways:      parseInt(document.getElementById('input-driveways').value) || 0,
+  };
+}
+
 function onSolve() {
   clearSolveOverlays();
+  document.getElementById('optimizer-panel').style.display = 'none';
   document.getElementById('status').textContent = 'Solving…';
+
+  if (USE_ARRANGER) {
+    const reqs = getReqs();
+    const frontageVal = document.getElementById('input-frontage').value;
+    const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
+    const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
+    const schema = buildTestSchema(reqs, frontage, setbackFt);
+    const { elements } = realizeArrangement(schema, parcelLatLng, PROFILES.retail);
+    const layout = layoutFromArrangement(elements);
+    lastLayout = layout;
+    renderLayout(layout, reqs, true, frontage);
+    document.getElementById('btn-render').disabled = false;
+    return;
+  }
 
   const hints = {
     setbackFt:             parseFloat(document.getElementById('input-setback').value) || 20,
@@ -154,12 +236,7 @@ function onSolve() {
     orientationPreference: aiHints.orientationPreference ?? 'auto',
     frontage:              document.getElementById('input-frontage').value,
   };
-  const reqs = {
-    pondPct:        parseFloat(document.getElementById('input-pond-pct').value) || 15,
-    buildings:      getBuildings(),
-    parking_stalls: parseInt(document.getElementById('input-parking').value) || 0,
-    driveways:      parseInt(document.getElementById('input-driveways').value) || 0,
-  };
+  const reqs = getReqs();
 
   const layout = solveLayout(parcelLatLng, reqs, hints);
 
@@ -169,11 +246,11 @@ function onSolve() {
     && JSON.stringify(layout.detention_pond) === JSON.stringify(layout2.detention_pond);
 
   lastLayout = layout;
-  renderLayout(layout, reqs, isDeterministic);
+  renderLayout(layout, reqs, isDeterministic, hints.frontage);
   document.getElementById('btn-render').disabled = false;
 }
 
-function renderLayout(layout, reqs, isDeterministic) {
+function renderLayout(layout, reqs, isDeterministic, frontageHint) {
   const map = getMap();
 
   // Basin — blue-green
@@ -250,6 +327,26 @@ function renderLayout(layout, reqs, isDeterministic) {
   document.getElementById('stat-parking').textContent = `${stallCount} stalls`;
   document.getElementById('stats-panel').style.display = 'flex';
 
+  // Score
+  const resolvedFrontage = ['N','S','E','W'].includes(frontageHint) ? frontageHint : 'S';
+  const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail);
+  document.getElementById('score-total').textContent =
+    `${scoreResult.total.toFixed(2)} / ${scoreResult.maxScore.toFixed(2)}`;
+  const breakdown = document.getElementById('score-breakdown');
+  breakdown.innerHTML = '';
+  for (const [name, term] of Object.entries(scoreResult.terms)) {
+    const row = document.createElement('div');
+    row.className = 'score-term';
+    const c = term.contribution;
+    const cls = c > 0.005 ? 'score-pos' : c < -0.005 ? 'score-neg' : 'score-zero';
+    row.innerHTML =
+      `<span class="score-term-name">${TERM_LABELS[name] ?? name}</span>` +
+      `<span class="score-term-raw">${term.raw.toFixed(2)}</span>` +
+      `<span class="score-term-contrib ${cls}">${c >= 0 ? '+' : ''}${c.toFixed(2)}</span>`;
+    breakdown.appendChild(row);
+  }
+  document.getElementById('score-panel').style.display = 'flex';
+
   // Warnings
   const warningsEl = document.getElementById('warnings-panel');
   warningsEl.innerHTML = '';
@@ -271,6 +368,62 @@ function renderLayout(layout, reqs, isDeterministic) {
   document.getElementById('status').textContent = layout.warnings.length ? '' : 'Layout solved successfully.';
 
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
+}
+
+function onOptimize() {
+  clearSolveOverlays();
+  document.getElementById('status').textContent = 'Optimizing…';
+
+  const frontageVal = document.getElementById('input-frontage').value;
+  const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
+
+  const baseHints = {
+    setbackFt:   parseFloat(document.getElementById('input-setback').value) || 20,
+    clearanceFt: aiHints.clearanceFt ?? 30,
+  };
+  const reqs = getReqs();
+  const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
+
+  const { best, all } = optimizeLayout(
+    parcelLatLng, reqs, baseHints, PROFILES.retail, parcelFt, parcelAreaSqFt, frontage
+  );
+
+  lastLayout = best.layout;
+  renderLayout(best.layout, reqs, true, frontage);
+  showOptimizerResult(best, all);
+  document.getElementById('btn-render').disabled = false;
+  document.getElementById('status').textContent =
+    `Optimizer chose Basin: ${best.params.basinCorner} (${all.length} layouts scored).`;
+}
+
+function showOptimizerResult(best, all) {
+  document.getElementById('optimizer-winner-label').innerHTML =
+    `<span class="opt-winner-label">Winner: Basin ${best.params.basinCorner}</span>`;
+
+  const container = document.getElementById('optimizer-candidates');
+  container.innerHTML = '';
+
+  all.forEach((c, i) => {
+    const isWinner = i === 0;
+    const row = document.createElement('div');
+    row.className = 'opt-candidate' + (isWinner ? ' opt-candidate-winner' : '');
+
+    row.innerHTML =
+      `<span class="opt-rank">#${i + 1}</span>` +
+      `<span class="opt-params">Basin: ${c.params.basinCorner}</span>` +
+      `<span class="opt-score">${c.total.toFixed(2)}</span>`;
+
+    if (c.unplaced > 0) {
+      const note = document.createElement('span');
+      note.className = 'opt-unplaced';
+      note.textContent = `${c.unplaced} bldg${c.unplaced > 1 ? 's' : ''} unplaced`;
+      row.appendChild(note);
+    }
+
+    container.appendChild(row);
+  });
+
+  document.getElementById('optimizer-panel').style.display = 'flex';
 }
 
 function onRender() {
@@ -303,10 +456,13 @@ function onClear() {
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }
   document.getElementById('btn-use-boundary').disabled = true;
   document.getElementById('btn-solve').disabled = true;
+  document.getElementById('btn-optimize').disabled = true;
   document.getElementById('acreage').textContent = '';
   document.getElementById('status').textContent = '';
   document.getElementById('ai-status').textContent = '';
   document.getElementById('stats-panel').style.display = 'none';
+  document.getElementById('score-panel').style.display = 'none';
+  document.getElementById('optimizer-panel').style.display = 'none';
   document.getElementById('warnings-panel').innerHTML = '';
   clearDrawing();
 }

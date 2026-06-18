@@ -68,6 +68,7 @@
     <button id="btn-ai-apply">Apply AI Hints</button>
     <div id="ai-status"></div>
     <button id="btn-solve" disabled>Solve Layout</button>
+    <button id="btn-optimize" disabled>Optimize Layout</button>
     <button id="btn-render" disabled>View Scale Drawing</button>
     <div id="status"></div>
     <div id="stats-panel" style="display:none">
@@ -77,6 +78,19 @@
       <div class="stat-row"><span class="stat-label">Footprint</span><span id="stat-footprint"></span></div>
       <div class="stat-row"><span class="stat-label">Basin</span><span id="stat-basin"></span></div>
       <div class="stat-row"><span class="stat-label">Parking</span><span id="stat-parking"></span></div>
+    </div>
+    <div id="score-panel" style="display:none">
+      <div class="sidebar-section-title">Score (Retail)</div>
+      <div class="stat-row">
+        <span class="stat-label">Total</span>
+        <span id="score-total"></span>
+      </div>
+      <div id="score-breakdown"></div>
+    </div>
+    <div id="optimizer-panel" style="display:none">
+      <div class="sidebar-section-title">Optimizer</div>
+      <div id="optimizer-winner-label"></div>
+      <div id="optimizer-candidates"></div>
     </div>
     <div id="warnings-panel"></div>
   </div>
