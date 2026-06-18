@@ -11,7 +11,7 @@ satellite imagery background and exports as PNG.
 
 ## Current status
 
-All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phase A COMPLETE.
+All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–C COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -46,16 +46,18 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | — | Fix: E/W parking multi-lat edge sampling (`sampleEdgeLng`) | 35eafbe |
 | — | Fix: S/N parking stall loss on slanted/tilted parcels (`sampleEdgeLat` + scan) | 189c475 |
 
-### Scoring, Optimizer, Relational Placement (all done — commit 85b1a5e)
-| What | File | Status |
-|------|------|--------|
-| Pure layout scorer, 9 weighted terms | js/score.js | ✅ |
-| Score breakdown panel in sidebar | index.html + styles.css + main.js | ✅ |
-| Brute-force optimizer over 4 basin corners | js/optimize.js | ✅ |
-| "Optimize Layout" button + "Why This Won" ranked panel | index.html + styles.css + main.js | ✅ |
-| Export `placeBuilding` from solver.js | js/solver.js | ✅ |
-| arrange.js Phase A: local frame + schema parser + topo-sort + building→parcelFrontage | js/arrange.js | ✅ |
-| USE_ARRANGER flag + adapters in main.js | js/main.js | ✅ |
+### Scoring, Optimizer, Relational Placement (all done)
+| What | File | Commit | Status |
+|------|------|--------|--------|
+| Pure layout scorer, 9 weighted terms | js/score.js | 85b1a5e | ✅ |
+| Score breakdown panel in sidebar | index.html + styles.css + main.js | 85b1a5e | ✅ |
+| Brute-force optimizer over 4 basin corners | js/optimize.js | 85b1a5e | ✅ |
+| "Optimize Layout" button + "Why This Won" ranked panel | index.html + styles.css + main.js | 85b1a5e | ✅ |
+| Export `placeBuilding` from solver.js | js/solver.js | 85b1a5e | ✅ |
+| arrange.js Phase A: local frame + schema parser + topo-sort + building→parcelFrontage | js/arrange.js | 85b1a5e | ✅ |
+| arrange.js Phase B: parking → building face, stall-count sizing, clip-to-free | js/arrange.js | fd55d90 | ✅ |
+| arrange.js Phase C: driveway connects parcelFrontage → parking, entryU | js/arrange.js | fd55d90 | ✅ |
+| USE_ARRANGER = true (arranger is live for Solve button) | js/main.js | fd55d90 | ✅ |
 
 ---
 
@@ -68,7 +70,7 @@ config.js           API keys — GITIGNORED, never commit
 config.example.js   Safe shape reference
 SCORING.md          Spec for score.js (implemented)
 OPTIMIZER_TASK.md   Spec for optimize.js (implemented)
-relational-placement-spec.md  Spec for arrange.js (Phase A implemented; B-E pending)
+relational-placement-spec.md  Spec for arrange.js (Phases A–C done; D–E pending)
 js/
   main.js           App state + wires UI events → solver → renderer → scorer
   map.js            Google Maps init, click-to-draw polygon sketching
@@ -83,7 +85,7 @@ js/
   score.js          score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
                     PROFILES.retail — scoring weights + placement defaults
   optimize.js       optimizeLayout(...) — 4 basin corners, keep highest score
-  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phase A
+  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phases A–C
 ```
 
 ---
@@ -99,8 +101,9 @@ aiHints       // accumulated hints from AI (merged on each Apply AI Hints click)
               // NOTE: aiHints.frontage is NOT read directly in onSolve —
               // onApplyAI writes it into the #input-frontage dropdown instead.
 
-const USE_ARRANGER = false;  // Phase A test flag — set true to route onSolve through
-                              // realizeArrangement instead of solveLayout
+const USE_ARRANGER = true;  // Arranger is LIVE — onSolve routes through
+                             // realizeArrangement (Phases A–C). Optimizer always
+                             // uses solveLayout directly, unaffected by this flag.
 ```
 
 ---
@@ -174,11 +177,11 @@ openSpace:       0.0    // placeholder (irrelevant for retail)
 setbackFt:            20    // parcel setback before placement
 clearanceFt:          30    // building-to-building clearance gap
 maxBuildingDepthFt:   70    // max building depth from road (arrange.js size derivation)
-minBuildingAreaSqFt: 400    // minimum viable building size (Phase E feasibility)
-stallDepthFt:         18    // parking stall depth (Phase B)
-aisleFt:              24    // parking aisle width (Phase B)
-drivewayWidthFt:      24    // driveway strip width (Phase C)
-gapFt:                10    // gap between elements (Phase D groups)
+minBuildingAreaSqFt: 400    // minimum viable area (feasibility check for parking too)
+stallDepthFt:         18    // parking stall depth
+aisleFt:              24    // parking aisle width
+drivewayWidthFt:      24    // driveway strip width
+gapFt:                10    // gap between elements (parking → free subtraction)
 ```
 
 Max score for retail = sum of positive weights = 1.0+0.9+0.7+0.6+0.5+0.3+0.15 = **4.15**.
@@ -215,7 +218,6 @@ const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, 
 // then populate #score-total and #score-breakdown
 ```
 
-`renderLayout` 4th parameter `frontageHint` was added this session.
 `onSolve` passes `hints.frontage`; `onOptimize` passes the resolved frontage.
 
 ---
@@ -263,6 +265,7 @@ baseHints = {
   ranked candidate rows (green highlighted for rank #1, red for unplaced buildings).
 - Regular `onSolve` hides the optimizer panel (stale results cleared).
 - `onClear` hides and disables everything.
+- **Note:** Optimize always uses `solveLayout` (not the arranger) — `USE_ARRANGER` has no effect on it.
 
 ---
 
@@ -271,7 +274,7 @@ baseHints = {
 ### Spec file
 `relational-placement-spec.md` — read this before implementing any phase.
 
-### Current status: Phase A COMPLETE (tested 2026-06-18)
+### Current status: Phases A–C COMPLETE (committed fd55d90, 2026-06-18)
 
 ### Entry point
 ```javascript
@@ -331,13 +334,15 @@ Convert local → feet:
   y = u * t̂.y + v * n̂.y
 
 frontageV(parcelFt, frame) = min(v for all parcel vertices)
-  = the v-coordinate of the frontage edge (most inward = most negative or zero)
+  = the v-coordinate of the frontage edge (closest to road = smallest v)
 ```
 
 ### Topological sort
 Dependencies extracted from `place.anchor`, `place.to`, `place.connects` (excluding
 parcel-level anchors: `parcelFrontage`, `parcelCorner`). DFS topo-sort; cycle → all
 involved elements return `{feasible: false, reason: 'Dependency cycle'}`.
+
+---
 
 ### Phase A — realizeBuilding (anchor: 'parcelFrontage' only)
 
@@ -359,11 +364,11 @@ depthFt=100, faceFt=200 → bSpec: length_ft=200, width_ft=100. Exact round-trip
 
 **Target point derivation:**
 ```javascript
-vFront  = frontageV(parcelFt, frame)          // v-coord of frontage edge
-halfDepth = bSpec.width_ft / 2                // shorter side faces road at orient=0
-targetV = vFront + setbackFt + halfDepth      // building center depth
-targetU = 0                                    // alignU:'center' → at parcel centroid
-targetPt = localToFeet(targetU, targetV, frame)
+vFront    = frontageV(parcelFt, frame)       // v-coord of frontage edge
+halfDepth = bSpec.width_ft / 2              // shorter side faces road at orient=0
+targetV   = vFront + setbackFt + halfDepth  // building center depth from road
+targetU   = 0                               // alignU:'center' → at parcel centroid
+targetPt  = localToFeet(targetU, targetV, frame)
 ```
 
 For `alignU: 'left'|'right'`: targetU = parcel u-extent min/max ± (setbackFt + length/2).
@@ -371,11 +376,10 @@ For `alignU: 'left'|'right'`: targetU = parcel u-extent min/max ± (setbackFt + 
 **Placement:**
 ```javascript
 const placed = placeBuilding(free, bSpec, targetPt, [0, 90], centroid);
-// placeBuilding is the exported function from solver.js
 // erodes free by reach, grids legal space, snaps to closest candidate to targetPt
 ```
 
-**Free space update (mirrors solveLayout step 5):**
+**Free space update:**
 ```javascript
 const foot = rectPoly(result.center_x_ft, result.center_y_ft,
                       result.length_ft, result.width_ft,
@@ -384,26 +388,123 @@ const buf = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
 if (buf) free = turf.difference(free, buf) ?? free;
 ```
 
-### Element output shape (Phase A buildings)
+**Building element output shape:**
 ```javascript
 {
-  id:              'b1',
-  type:            'building',
-  feasible:        true,
-  label:           'b1',        // same as id in Phase A; groups will provide child labels
-  length_ft:       200,
-  width_ft:        100,
-  center_x_ft:     ...,         // feet from parcel centroid
-  center_y_ft:     ...,
-  orientation_deg: 0,           // 0 = length along x (E-W); 90 = length along y (N-S)
+  id: 'b1', type: 'building', feasible: true,
+  label: 'b1',
+  length_ft: 200, width_ft: 100,
+  center_x_ft: ..., center_y_ft: ...,  // feet from parcel centroid
+  orientation_deg: 0,                   // 0 = length along x; 90 = length along y
 }
-// If infeasible:
-{ id, type, feasible: false, reason: 'No valid position found at parcelFrontage anchor' }
 ```
 
-Non-building types (parking, driveway, basin) return `{feasible: false, reason: '... not implemented (Phase A: building only)'}`.
+---
 
-### Adapter in main.js
+### Phase B — realizeParking (anchor: element id, face: 'front'|'rear')
+
+**Looks up anchor building from `realized` map. Fails gracefully if anchor is infeasible.**
+
+**Bounds helper** `buildingLocalBounds(b, frame)`: rotates all 4 corners into local (u,v)
+and returns `{uMin, uMax, vMin, vMax}`. `vMin` = front face (closest to road) for any
+frontage direction and any orientation_deg.
+
+**Sizing from stall target:**
+```javascript
+faceFt        = ab.uMax - ab.uMin           // building's u-extent (along frontage)
+stallsPerRow  = max(1, floor(faceFt / 9))   // 9 ft per stall width
+rows          = ceil(targetStalls / stallsPerRow)
+stallRowDepth = profile.stallDepthFt + profile.aisleFt / 2  // 18 + 12 = 30 ft/row
+depthFt       = rows * stallRowDepth
+```
+
+**Placement in local frame:**
+```javascript
+vFace = ab.vMin  // front face of building (face: 'front')
+vNear = vFace - depthFt  // parking extends toward road
+vFar  = vFace            // parking touches building face
+
+// 4 corners unproject: localToFeet(u,v,frame) → feetToLatLngFromCentroid(ft, centroid)
+```
+
+**Clip to `free` (parking tolerates partial coverage):**
+```javascript
+const clipped = turf.intersect(free, parkRect);
+actualSqFt    = turf.area(clipped) * 10.7639;
+actualStalls  = floor(actualSqFt / 325);
+// Attach .properties = { center_x_ft, center_y_ft, orientation_deg: 0, stall_count }
+```
+
+**Parking element output shape:**
+```javascript
+{
+  id: 'p1', type: 'parking', feasible: true,
+  feature: clipped,          // Turf Feature<Polygon> with .properties attached
+  stall_count: actualStalls,
+  localBounds: { uMin, uMax, vMin: vNear, vMax: vFar },
+  // localBounds stores the PRE-CLIP intended rectangle so driveways can
+  // position against the full parking block without bbox approximation error.
+}
+```
+
+**Free space update:** subtract `clipped + profile.gapFt (10 ft) buffer`.
+
+---
+
+### Phase C — realizeDriveway (connects: 'parcelFrontage', to: elementId, entryU: 'left'|'center'|'right')
+
+**General bounds helper** `elementLocalBounds(el, frame, centroid)`:
+- If `el.localBounds` exists (parking) → return it directly (exact)
+- Else if `el.type === 'building'` → `buildingLocalBounds(el, frame)`
+- Else if `el.feature` exists → approximate from turf bbox corners converted to local
+
+**Target resolution:** looks up `place.to` in `realized`. Fails if target is infeasible.
+
+**u-center of driveway** (within target's u-extent):
+```javascript
+case 'left':   uCenter = targetBounds.uMin + halfWidth
+case 'right':  uCenter = targetBounds.uMax - halfWidth
+default:       uCenter = (targetBounds.uMin + targetBounds.uMax) / 2
+```
+
+**v range:**
+```javascript
+vFront  = frontageV(parcelFt, frame)   // parcel road edge
+vTarget = targetBounds.vMin            // parking's near edge (closest to road)
+// Rectangle: [uCenter ± halfWidth] × [vFront - 50, vTarget]
+// 50 ft over-extension ensures clip to parcel reaches the road boundary exactly.
+```
+
+**Clip to `parcelTurf` (NOT free):** driveways pass through the setback zone between
+road and parking, which has already been eroded from `free`. Clipping to the full
+parcel polygon keeps the driveway inside the lot while covering the setback strip.
+
+**Driveway element output shape:**
+```javascript
+{
+  id: 'd1', type: 'driveway', feasible: true,
+  feature: clipped,  // Turf Feature<Polygon>, no properties needed
+}
+```
+
+**Free space update:** subtract `clipped + 3 ft buffer` so buildings don't land in the lane.
+
+---
+
+### realizeElement dispatch (Phase C)
+```javascript
+function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
+  if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
+  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
+  if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
+  return { id: el.id, type: el.type, feasible: false,
+           reason: `${el.type} not implemented (Phase C: building + parking + driveway only)` };
+}
+```
+
+---
+
+### Adapter in main.js (`layoutFromArrangement`)
 ```javascript
 function layoutFromArrangement(elements) {
   return {
@@ -412,42 +513,64 @@ function layoutFromArrangement(elements) {
       .map(e => ({ label: e.label ?? e.id, length_ft: e.length_ft, width_ft: e.width_ft,
                    center_x_ft: e.center_x_ft, center_y_ft: e.center_y_ft,
                    orientation_deg: e.orientation_deg ?? 0 })),
-    parking_areas: [],
-    driveways: [],
+    parking_areas: elements
+      .filter(e => e.type === 'parking' && e.feasible)
+      .map(e => e.feature),           // already has .properties attached
+    driveways: elements
+      .filter(e => e.type === 'driveway' && e.feasible)
+      .map(e => e.feature),
     detention_pond: null,
     warnings: elements.filter(e => !e.feasible)
                       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase A)',
+    rationale: 'realizeArrangement (Phase C)',
   };
 }
 ```
 
-### Test schema builder in main.js
+### Test schema builder in main.js (`buildTestSchema`)
 ```javascript
 function buildTestSchema(reqs, frontage, setbackFt) {
-  return {
-    frontage,
-    elements: reqs.buildings.map(b => ({
-      id:    b.label || 'b',
-      type:  'building',
-      size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-      place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
-    })),
-  };
+  // Buildings: one per reqs.buildings entry, all anchored to parcelFrontage center
+  const buildingEls = reqs.buildings.map(b => ({
+    id:    b.label || 'b',
+    type:  'building',
+    size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
+    place: { anchor: 'parcelFrontage', setbackFt, alignU: 'center' },
+  }));
+
+  const elements = [...buildingEls];
+
+  if (reqs.parking_stalls > 0 && buildingEls.length > 0) {
+    // Parking anchored to first building's front face
+    elements.push({ id: 'p1', type: 'parking',
+      size: { stalls: reqs.parking_stalls },
+      place: { anchor: buildingEls[0].id, face: 'front' } });
+
+    if (reqs.driveways > 0) {
+      // 1→center, 2→left+right, 3→left+center+right
+      const count   = Math.min(reqs.driveways, 3);
+      const entryUs = count === 1 ? ['center'] : count === 2 ? ['left', 'right']
+                                                              : ['left', 'center', 'right'];
+      entryUs.forEach((entryU, i) => {
+        elements.push({ id: `d${i+1}`, type: 'driveway',
+          size: { widthFt: 24 },
+          place: { connects: 'parcelFrontage', to: 'p1', entryU } });
+      });
+    }
+  }
+
+  return { frontage, elements };
 }
 ```
 
 ### USE_ARRANGER flag
-`const USE_ARRANGER = false;` at top of main.js.
+`const USE_ARRANGER = true;` at top of main.js — **currently live**.
 When `true`, `onSolve` builds the test schema and routes through `realizeArrangement`.
-When `false` (default/live), existing `solveLayout → renderLayout` path runs unchanged.
-The optimizer (`onOptimize`) always uses `solveLayout` directly, unaffected by flag.
+The optimizer (`onOptimize`) always uses `solveLayout` directly, unaffected by this flag.
 
 ---
 
-## solver.js — placeBuilding export (added for arrange.js)
-
-The building placement loop in `solveLayout` was refactored to call a new exported function:
+## solver.js — placeBuilding export (used by arrange.js)
 
 ```javascript
 // Exported from solver.js — used by both solveLayout and arrange.js
@@ -467,9 +590,6 @@ export function placeBuilding(free, bSpec, targetPt, orientations, centroid) {
 // Caller is responsible for subtracting footprint + clearance from free after placement.
 ```
 
-`solveLayout` now calls `placeBuilding(free, b, zoneCentroid(...), orientations, centroid)`.
-Behavior is IDENTICAL to before — pure refactor, no logic changes.
-
 ---
 
 ## Frontage parameter — how it works
@@ -486,7 +606,7 @@ or programmatic calls where basinCorner is omitted.
 
 ---
 
-## Parking placement algorithm (`placeAlongFrontageEdge`)
+## Parking placement algorithm (`placeAlongFrontageEdge`) — solver.js
 
 All four directions place a 60 ft deep parking block against the frontage edge of
 `biggestPoly(free)`. The challenge is placing an **axis-aligned rectangle** against
@@ -494,22 +614,16 @@ a boundary that may be **slanted** — the rectangle will be clipped, losing sta
 
 ### S and N frontage (two-phase scan + anchor)
 
-**Root cause of original bug:** Centering parking at the bbox midpoint and anchoring
-to `minLat`/`maxLat` fails for tilted parcels (`minLat` = the corner tip with zero
-width → any sample near it gives near-zero parking width). Also fails when basin clips
-the south band (bbox center extends into basin area).
-
 **Phase 1 — find where the frontage actually is (30-step scan):**
-Scan in 30 steps across the south 50% of the free space's lat range (or north 50% for
-N frontage). At each step, intersect a thin band with `biggest`, measure cross-section
-width. Stop at the **first (southernmost) lat where width ≥ needed parking width**.
+Scan in 30 steps across the south 50% of the free space's lat range. At each step,
+intersect a thin band with `biggest`, measure cross-section width. Stop at the
+**first (southernmost) lat where width ≥ needed parking width**.
 Fall back to widest lat seen if no single lat is wide enough.
 
 **Phase 2 — pin to slanted boundary (`sampleEdgeLat`):**
-Given the centerLng and halfW, call `sampleEdgeLat(biggest, 'S', centerLng, halfW, ...)`.
-This samples the south boundary at 7 longitudes across the parking width, returns the
-**northernmost (highest) south boundary lat** — so the parking rectangle's south edge
-sits at or above the actual boundary everywhere. No clipping.
+Samples the south boundary at 7 longitudes across the parking width, returns the
+**northernmost south boundary lat** — so the parking rectangle's south edge sits at
+or above the actual boundary everywhere. No clipping.
 
 ```javascript
 function sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s) {
@@ -529,16 +643,13 @@ function sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s) {
 }
 ```
 
-For N frontage: scan downward from `maxLat`, anchor parking's **north** edge using
-`sampleEdgeLat('N')` which returns southernmost north boundary → parking extends south.
-
-### E and W frontage (unchanged)
+### E and W frontage
 60 ft depth in lng; centered at `(minLat + maxLat) / 2`. `sampleEdgeLng` samples
 E/W boundary at 7 latitudes, returns most-constrained point. Rectangle anchored there.
 
 ---
 
-## Driveways (`makeDriveways`)
+## Driveways (`makeDriveways`) — solver.js
 
 24 ft wide strips from parcel boundary to parking edge.
 
@@ -597,41 +708,16 @@ background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.
 - **Turf uses WGS84** `[lng, lat]`. Feet coords only for grid sampling and building corners.
 - **Erosion guarantees containment**: erode free by `reach` = half-diagonal; any center
   inside the eroded region guarantees the full rectangle fits. No place-then-check.
+- **Buildings erode-and-fit; parking/driveway/basin clip-to-free.** Buildings must stay
+  rectangular so clipping is not allowed. Parking/driveway/basin tolerate irregular shapes.
 - **Determinism**: buildings sorted largest-first; candidates sorted by dist2 then y then x.
   Solver runs twice per solve; warns if outputs differ. Arranger is deterministic by construction.
-- **placeBuilding caller updates free**: the function returns the placed spec; the caller
-  subtracts footprint + clearance from free. Both `solveLayout` and `arrange.js` do this.
-- **USE_ARRANGER = false by default**: all live traffic uses the existing solver path.
-
----
-
-## What's next: arrange.js Phase B
-
-**Phase B: `parking → building front face`**
-
-Schema element:
-```json
-{ "id": "p1", "type": "parking",
-  "size": { "stalls": 60 },
-  "place": { "anchor": "b1", "face": "front", "depthRowsFt": "auto" } }
-```
-
-Implementation notes from the spec:
-- Resolve `anchor: "b1"` → look up realized element `b1` in `realized` map
-- `face: "front"` → the element's low-v edge in local frame (closest to frontage)
-- Get the building's u-extent in local frame; the parking rectangle spans that u-range
-- `size.stalls` → derive depth: `depth = ceil(stalls / (faceFt / stallSpacingFt)) * stallRowDepthFt`
-  where `stallRowDepthFt = profile.stallDepthFt + profile.aisleFt / 2` (one row + half aisle)
-  and `stallSpacingFt = 9` (standard stall width)
-- Candidate parking rect: `[uMin, vFace - depth, uMax, vFace]` in local, then unproject to lng/lat
-- Clip to `free` (`turf.intersect(free, parkingRect)`) — parking tolerates clipping
-- If clipped area < `minViable` → `{feasible: false}`
-- Attach `.properties = { center_x_ft, center_y_ft, stall_count }` to the Turf feature
-  (matching what `score.js` and `render.js` expect for `parking_areas[0].properties`)
-- Subtract clipped parking + profile.gapFt buffer from free
-
-**Key: buildings must use erode-and-fit (no clipping). Parking/driveway/basin use clip-to-free.**
-This distinction is deliberate and is already stated in arrange.js comments.
+- **placeBuilding caller updates free**: returns the placed spec; caller subtracts footprint +
+  clearance. Both `solveLayout` and `arrange.js` follow this rule.
+- **Driveway clips to parcelTurf, not free**: driveways span the setback zone between road
+  edge and parking, which has already been eroded from `free`. Must clip to full parcel.
+- **parking.localBounds stores pre-clip extents**: so `realizeDriveway` can position against
+  the full intended parking rectangle without bbox-in-lat/lng approximation error.
 
 ---
 
@@ -640,10 +726,37 @@ This distinction is deliberate and is already stated in arrange.js comments.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | A | Local frame, schema parser, topo-sort, building → parcelFrontage | ✅ Done |
-| B | parking → building face, stall-count sizing, clip-to-free | ⬜ Next |
-| C | driveway connects frontage → parking, entryU | ⬜ |
-| D | group/strip: children laid along t̂, gapFt, child faces as anchors | ⬜ |
+| B | parking → building face, stall-count sizing, clip-to-free | ✅ Done |
+| C | driveway connects frontage → parking, entryU left/center/right | ✅ Done |
+| D | group/strip: children laid along t̂, gapFt, child faces as anchors | ⬜ Next |
 | E | basin → parcelCorner, full feasibility flags, multi-element schemas | ⬜ |
+
+---
+
+## What's next: arrange.js Phase D
+
+**Phase D: `group` / `strip` — multiple buildings as a unit**
+
+Schema element:
+```json
+{ "id": "g1", "type": "group", "layout": "strip",
+  "place": { "anchor": "parcelFrontage", "setbackFt": 25 },
+  "gapFt": 0,
+  "children": [
+    { "id": "b1", "size": { "areaSqFt": 8000 } },
+    { "id": "b2", "size": { "areaSqFt": 8000 } },
+    { "id": "b3", "size": { "areaSqFt": 8000 } }
+  ] }
+```
+
+Implementation notes from the spec:
+- `layout: "strip"` → children laid along t̂ with `gapFt` between them (0 = shared walls)
+- Group is placed as a unit first (its bounding box placed by `place`), then children
+  distributed inside along t̂
+- Each child's individual faces remain valid anchors (`anchor: "b2"`, `face: "front"`)
+- `realizeElement` handles `type: "group"` → `realizeGroup` which places each child and
+  adds them all to `realized` under their own IDs
+- The group bounding box is subtracted from `free` as a whole (with clearanceFt buffer)
 
 ---
 
@@ -656,6 +769,8 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 
 ## Git log (recent)
 ```
+fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
+8387ab0 Update SUMMARY.md with full session detail (scoring, optimizer, Phase A arrange)
 85b1a5e Add scoring, optimizer, and Phase A relational placement engine
 189c475 Add frontage UI, fix S/N parking on slanted/tilted parcels
 10e6584 Update SUMMARY.md with full session context
@@ -664,8 +779,4 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 781f786 Fix E/W driveway: use parking cross-section as inner boundary, not bbox
 96d9b13 Wire aiHints.frontage through to solver in onSolve
 165e183 Add road frontage parameter (steps 1-3 + AI parsing)
-11658a4 P3: cleanups — multi-region sampling, long-axis spread, basin warn, tie-break
-442ddce P2: fix building-to-building clearance (was clearance/2, now full clearance)
-9028b90 P1: satellite background on canvas/PNG via Mercator projection
-69cdd48 Phase 7: AI hints layer via Gemini (parseInstructions → hints → re-solve)
 ```
