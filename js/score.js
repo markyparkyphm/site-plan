@@ -125,7 +125,7 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
 
   add('openSpace', 0);
 
-  const total = Object.values(terms).reduce((s, t) => s + t.contribution, 0);
-  const maxScore = Object.values(W).filter(w => w > 0).reduce((s, w) => s + w, 0);
+  const total    = Object.values(terms).reduce((s, t) => s + t.contribution, 0);
+  const maxScore = Object.values(terms).reduce((s, t) => t.weight > 0 ? s + t.weight : s, 0);
   return { total, maxScore, terms };
 }

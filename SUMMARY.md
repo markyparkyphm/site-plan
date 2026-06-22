@@ -11,7 +11,7 @@ satellite imagery background and exports as PNG.
 
 ## Current status
 
-All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–E + Schema Optimizer Phases 1–3 COMPLETE.
+All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–E + Schema Optimizer Phases 1–3 + AI Schema-Proposer Phase 1 COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -64,6 +64,8 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | Fix optimizer crash on Turf geometry errors (per-candidate try/catch + turf monkey-patch) | js/optimize.js | 6767a1f | ✅ |
 | Schema optimizer Phase 2: local refinement — fine setbackFt grid + numeric alignU offsets around top-K Phase 1 winners; export buildLocalFrame; alignU numeric support in realizeBuilding + realizeGroup | js/optimize.js + js/arrange.js + js/score.js + js/main.js | — | ✅ |
 | Schema optimizer Phase 3: Web Worker off main thread, streaming best-so-far on progress, step-through ranked list (displayK=10 clickable rows), cancel button | js/optimizer-worker.js (new) + js/optimize.js + js/main.js + js/score.js + index.html + styles.css | — | ✅ |
+| AI Schema-Proposer Phase 1: proposeArrangements (Gemini knob-set proposals, main-thread, 4 s timeout, AbortController), aiSeeds merge into ranked list tagged source:'ai', knobSig dedup vs grid, opt-ai-tag badge in UI | js/ai.js + js/optimize.js + js/optimizer-worker.js + js/main.js + styles.css | — | ✅ |
+| Fix maxScore computation in score.js: sum scoring term weights only (not all profile values) — was 600.15, now correctly 4.15 for retail | js/score.js | — | ✅ (on disk, not yet committed) |
 
 ---
 
@@ -89,6 +91,7 @@ js/
   render.js         async renderLayoutOnCanvas(canvas, parcelLatLng, layout, centroid)
   export.js         exportToPng()
   ai.js             parseInstructions(text) → hints via Gemini 2.5 Flash
+                    proposeArrangements(parcelSummary, reqs, frontage, profile) → knob-set[] for AI seeds
   score.js          score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
                     PROFILES.retail — scoring weights + placement defaults + searchConfig
   optimize.js       optimizeLayout(...) — legacy 4 basin corners (USE_SCHEMA_OPTIMIZER=false)
@@ -214,6 +217,17 @@ searchConfig: {
 Max score for retail = sum of positive weights = 1.0+0.9+0.7+0.6+0.5+0.3+0.15 = **4.15**.
 Score panel shows `total.toFixed(2) / maxScore.toFixed(2)`.
 
+**maxScore computation (bugfix — on disk, not yet committed):**
+```javascript
+// OLD (buggy): summed all positive numeric values in profile, including placement defaults
+// (setbackFt:20, clearanceFt:30, maxBuildingDepthFt:70, etc.) → total was ~600.15
+const maxScore = Object.values(W).filter(w => w > 0).reduce((s, w) => s + w, 0);
+
+// NEW (correct): sums only the weights of scored terms, always 4.15 for retail
+const maxScore = Object.values(terms).reduce((s, t) => t.weight > 0 ? s + t.weight : s, 0);
+```
+The root cause: `PROFILES.retail` contains both scoring weights and placement defaults in the same flat object. `Object.values(W)` included all of them.
+
 ### Score helpers
 ```javascript
 const clamp01 = v => Math.max(0, Math.min(1, v));
@@ -249,6 +263,44 @@ const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, 
 
 ---
 
+## ai.js — AI features
+
+### `parseInstructions(text)` — existing (Phase 7)
+Parses a plain-English site instruction into a hints object via Gemini 2.5 Flash.
+Returns `{ setbackFt?, clearanceFt?, basinCorner?, orientationPreference?, frontage? }`.
+
+### `proposeArrangements(parcelSummary, reqs, frontage, profile)` — AI Schema-Proposer Phase 1
+
+**Important:** Runs on the **main thread only**. Workers have no `window` and cannot read `GEMINI_API_KEY`. Local-only until the key is proxied through a backend — do NOT deploy with a client-readable key.
+
+**Returns:** `Promise<knobSet[]>` — validated knob-set objects ready to pass to `buildCandidateSchema`. Returns `[]` on any error (missing key, timeout, bad JSON, API error, failed validation).
+
+**Knob-set shape:**
+```javascript
+{
+  layout:       'strip',              // currently always 'strip'
+  gapFt:        0 | 20,              // snapped to nearest value in searchConfig.gapFt
+  parkingFaces: 'front',             // validated against searchConfig.parkingFaces split('+')
+  driveways:    ['left'],            // array of entryU strings, each in {left,center,right}
+  basinCorner:  'rearLeft' | ...,    // required; object dropped if invalid
+  setbackFt:    25,                  // clamped [0, 200]
+  alignU:       'center' | number,   // string {left,center,right} or finite number (feet)
+}
+```
+
+**Prompt:** Injects parcel acres/width/depth, building program sqFt, parking stalls, pondPct, and all valid values from `profile.searchConfig`. Requests exactly 5 proposals with no prose/fences.
+
+**Reliability design:**
+- 4 s `AbortController` timeout wrapping the fetch (fires before `clearTimeout` in finally block)
+- `temperature: 0.3`, `maxOutputTokens: 512`
+- Fence-stripping: `raw.replace(/```(?:json)?\n?/g, '').replace(/```\n?/g, '').trim()`
+- Per-object validation loop: `basinCorner` required (drops object if invalid); `layout` defaults `'strip'`; `gapFt` snapped to nearest in array; `parkingFaces` validated by splitting on `'+'`; `driveways` validated as `string[]` of `{left,center,right}`; `setbackFt` clamped `[0, 200]`; `alignU` accepts `string {left,center,right}` or finite number
+- Full outer `try/catch` → `[]` on any unexpected error
+
+**Why main thread:** Workers have no `window`, so `window.GEMINI_API_KEY` is undefined. The call must complete on the main thread before the worker is spawned. `onOptimize` was made `async` to `await proposeArrangements(...)` first, then passes `aiSeeds` to the worker via `postMessage`.
+
+---
+
 ## optimize.js — Schema optimizer (Phases 1–3) + legacy optimizer
 
 ### Legacy optimizer (behind USE_SCHEMA_OPTIMIZER = false)
@@ -262,16 +314,51 @@ export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt,
 
 **Entry point:**
 ```javascript
-export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null)
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = [])
 // Returns { ranked, totalTried }
-// ranked: array of { schema, layout, total, maxScore, terms, feasible:true } sorted by total desc
-// totalTried: count of all candidates attempted across Phase 1 + Phase 2 (including infeasible ones)
+// ranked: array of { schema, layout, total, maxScore, terms, feasible:true, source:'ai'|'grid' } sorted by total desc
+// totalTried: count of all candidates attempted across AI seeds + Phase 1 + Phase 2 (including infeasible ones)
 //
 // onProgress(callback): called whenever a new best candidate is found during the search.
 //   callback receives { best: candidate, totalTried }
 //   Used by the Web Worker (Phase 3) to stream progress to the main thread.
 //   Pass null (default) for the synchronous/legacy path.
+//
+// aiSeeds: pre-validated knob-set objects from proposeArrangements (main thread).
+//   Scored first through the identical realize→gate→score pipeline as grid candidates.
+//   Deduped against Phase 1 grid via knobSig. Pass [] for a purely deterministic run.
 ```
+
+**`knobSig` deduplication helper:**
+```javascript
+function knobSig(k) {
+  const dw = Array.isArray(k.driveways) ? [...k.driveways].sort().join(',') : String(k.driveways);
+  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}`;
+}
+```
+Builds a stable string key for a knob-set. Driveways array is sorted so `['right','left']` and `['left','right']` hash identically. Used to prevent AI seeds from being re-scored as Phase 1 grid candidates.
+
+**AI seeds execution (inside try block, after turf monkey-patch):**
+```javascript
+const seenSigs = new Set();
+for (const knobs of aiSeeds) {
+  const sig = knobSig(knobs);
+  if (seenSigs.has(sig)) continue;
+  seenSigs.add(sig);
+  totalTried++;
+  const schema = buildCandidateSchema(reqs, frontage, knobs);
+  let elements;
+  try { ({ elements } = realizeArrangement(schema, parcelLngLat, profile)); } catch (_) { continue; }
+  if (elements.some(e => !e.feasible)) continue;
+  const layout = layoutFromElements(elements);
+  const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+  const candidate = { schema, layout, total: result.total, maxScore: result.maxScore,
+                      terms: result.terms, feasible: true, source: 'ai' };
+  ranked.push(candidate);
+  notifyIfBetter(candidate);
+}
+```
+AI seeds run first so they can beat or tie the grid candidates. Phase 1 grid skips any sig already in `seenSigs`.
 
 **Phase 1 search space (current searchConfig):**
 - 1 layout (strip) × 2 gapFt × 1 parkingFaces (front) × 4 drivewaySets × 4 basinCorners × 3 setbackFts × 3 alignUs
@@ -379,10 +466,11 @@ globalThis.turf = { ...turfNS };  // mutable plain object — frozen namespace w
 import { optimizeArrangement } from './optimize.js';
 
 self.onmessage = ({ data }) => {
-  const { parcelLatLng, reqs, frontage, profile } = data;
+  const { parcelLatLng, reqs, frontage, profile, aiSeeds = [] } = data;
   const { ranked, totalTried } = optimizeArrangement(
     parcelLatLng, reqs, frontage, profile,
     (progress) => self.postMessage({ type: 'progress', ...progress }),
+    aiSeeds,
   );
   self.postMessage({ type: 'done', ranked, totalTried });
 };
@@ -396,7 +484,7 @@ self.onmessage = ({ data }) => {
   - Fired only on new best — typically 5–15 times per full run
   - Main thread renders `best.layout` live on the map (streaming best-so-far)
 - Worker → main (`type: 'done'`): `{ type, ranked, totalTried }`
-  - Fired once when both Phase 1 and Phase 2 are complete
+  - Fired once when AI seeds + Phase 1 + Phase 2 are all complete
 
 **Worker creation:** `new Worker('./js/optimizer-worker.js', { type: 'module' })`
 Requires page served over HTTP (Live Server ✓). Does not work from `file://`.
@@ -413,15 +501,24 @@ let lastReqs        = null;  // reqs at time of last optimize click (for step-th
 let lastFrontage    = 'S';   // frontage at time of last optimize click
 ```
 
-**`onOptimize` flow (USE_SCHEMA_OPTIMIZER = true):**
+**`onOptimize` flow (USE_SCHEMA_OPTIMIZER = true) — now `async`:**
 1. If a worker is already running, terminate it first (user hit Optimize again)
 2. Store `lastReqs` and `lastFrontage` for step-through click handlers
 3. Disable "Optimize Layout" button, show "Cancel Optimization" button
-4. Spawn new worker via `new Worker('./js/optimizer-worker.js', { type: 'module' })`
-5. `worker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail })`
-6. On `progress` message: `clearSolveOverlays()`, render `best.layout` live, update status text
-7. On `done` message: restore buttons, populate `lastRanked`, render winner, call `showSchemaOptimizerResult(ranked)`
-8. On `onerror`: restore buttons, log to console, show error in status bar
+4. Set status `'Proposing layouts…'`, await `proposeArrangements(parcelSummary, reqs, frontage, PROFILES.retail)`
+   - Computes `parcelSummary = { acres, widthFt, depthFt }` from `parcelFt` bounding box
+   - If user cancelled during the Gemini await (btn-optimize re-enabled by cancel handler), return early
+5. Set status `'Optimizing…'`, spawn new worker via `new Worker('./js/optimizer-worker.js', { type: 'module' })`
+6. `worker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds })`
+7. On `progress` message: `clearSolveOverlays()`, render `best.layout` live, update status text
+8. On `done` message: restore buttons, populate `lastRanked`, render winner, call `showSchemaOptimizerResult(ranked)`
+9. On `onerror`: restore buttons, log to console, show error in status bar
+
+**Cancellation guard after Gemini await:**
+```javascript
+if (!document.getElementById('btn-optimize').disabled) return; // cancelled during Gemini call
+```
+The cancel and solve handlers re-enable btn-optimize. If it was re-enabled while awaiting Gemini, skip spawning the worker.
 
 **`onCancelOptimize`:**
 ```javascript
@@ -438,8 +535,9 @@ function onCancelOptimize() {
 - `onClear`: terminates worker, hides cancel button, resets `lastRanked`/`lastReqs`
 - `onOptimize`: terminates any existing worker before spawning a new one
 
-**`showSchemaOptimizerResult(ranked)` (Phase 3 version):**
+**`showSchemaOptimizerResult(ranked)` (Phase 3 + AI Phase 1 version):**
 - Shows `searchConfig.displayK` (10) rows instead of `topK` (4)
+- Candidates with `source:'ai'` display an `<span class="opt-ai-tag">AI</span>` badge before the params
 - Winner row starts with both `opt-candidate-winner` and `opt-candidate-active` classes
 - Each row has a click handler for **step-through**:
   ```javascript
@@ -994,6 +1092,23 @@ Commit: 6767a1f
 | 1 | Exhaustive discrete cross-product search, synchronous, feasibility gate, ranked output | ✅ Done |
 | 2 | Local refinement: fine setbackFt grid (±9 ft in 2 ft steps) + numeric alignU offsets (±30/60 ft) around top-K winners | ✅ Done |
 | 3 | Web Worker + progressive UI: move search off main thread, stream best-so-far, step-through ranked list (displayK=10 rows) | ✅ Done |
+
+## Phase roadmap (AI schema-proposer)
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | proposeArrangements (main thread, Gemini 2.5 Flash, 5 knob-sets), aiSeeds merge into ranked list via identical realize→gate→score pipeline, knobSig dedup, opt-ai-tag badge, 4 s timeout | ✅ Done |
+| 2 | Bias variants + concurrency: fire Gemini concurrently with deterministic worker to hide latency; multiple prompt templates for diverse proposals | Not started |
+| Deploy | Backend proxy for Gemini key; rotate keys; lock Maps key with HTTP-referrer restriction | Not started |
+
+## Pending tasks
+
+- **Diagnose AI badge issue**: User reported no `AI` badge rows after testing Phase 1 on Live Server. Check DevTools console for `[AI proposer] seeds returned:` log line:
+  - `0 []` = GEMINI_API_KEY missing/not set in config.js, or 4 s timeout fired, or API error
+  - `5 [...]` but no badge = all 5 seeds failed the feasibility gate inside the worker (check parcel vs. program size)
+  - Error in console = API quota or malformed response
+- **Remove temp debug console.log** from `js/main.js` once AI badges are confirmed working (`console.log('[AI proposer] seeds returned:', aiSeeds.length, aiSeeds)` in `onOptimize`)
+- **Commit the score.js maxScore fix** — `Object.values(terms).reduce(...)` change is on disk but not committed
 
 ---
 
