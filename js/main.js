@@ -4,7 +4,7 @@ import { toPoly, polysOf, rectPoly } from './geometry.js';
 import { solveLayout } from './solver.js';
 import { renderLayoutOnCanvas } from './render.js';
 import { exportToPng } from './export.js';
-import { parseInstructions } from './ai.js';
+import { parseInstructions, proposeArrangements } from './ai.js';
 import { score, PROFILES } from './score.js';
 import { optimizeLayout, optimizeArrangement } from './optimize.js';
 import { realizeArrangement } from './arrange.js';
@@ -478,7 +478,7 @@ function onCancelOptimize() {
   document.getElementById('status').textContent = 'Optimization cancelled.';
 }
 
-function onOptimize() {
+async function onOptimize() {
   // Kill any in-progress worker before starting a new run.
   if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
 
@@ -496,6 +496,23 @@ function onOptimize() {
 
     document.getElementById('btn-optimize').disabled = true;
     document.getElementById('btn-cancel-optimize').style.display = '';
+    document.getElementById('status').textContent = 'Proposing layouts…';
+
+    // Build a parcel summary for the AI proposer from the feet-space vertices
+    // already computed at boundary-close time (parcelFt is module-level state).
+    const pSqFt = polygonAreaSqFt(parcelFt);
+    const _xs = parcelFt.map(p => p.x), _ys = parcelFt.map(p => p.y);
+    const parcelSummary = {
+      acres:   sqFtToAcres(pSqFt),
+      widthFt: Math.round(Math.max(..._xs) - Math.min(..._xs)),
+      depthFt: Math.round(Math.max(..._ys) - Math.min(..._ys)),
+    };
+    const aiSeeds = await proposeArrangements(parcelSummary, reqs, frontage, PROFILES.retail);
+
+    // Abort if the user hit Cancel or Solve during the Gemini call.
+    if (!document.getElementById('btn-optimize').disabled) return;
+
+    document.getElementById('status').textContent = 'Optimizing…';
 
     optimizerWorker = new Worker('./js/optimizer-worker.js', { type: 'module' });
 
@@ -546,7 +563,7 @@ function onOptimize() {
       document.getElementById('status').textContent = 'Optimizer error: ' + err.message;
     };
 
-    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail });
+    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds });
     return;
   }
 
@@ -622,9 +639,11 @@ function showSchemaOptimizerResult(ranked) {
     const row = document.createElement('div');
     row.className = 'opt-candidate' + (i === 0 ? ' opt-candidate-winner opt-candidate-active' : '');
     const dwLabel = Array.isArray(ck.driveways) ? ck.driveways.join('/') : ck.driveways;
+    const aiTag = c.source === 'ai' ? '<span class="opt-ai-tag">AI</span>' : '';
     row.innerHTML =
       `<span class="opt-rank">#${i + 1}</span>` +
       `<span class="opt-params">` +
+        aiTag +
         `${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
         (ck.gapFt > 0 ? ` · gap ${ck.gapFt}ft` : '') +
         ` · dw:${dwLabel}` +

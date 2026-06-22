@@ -9,11 +9,12 @@ globalThis.turf = { ...turfNS };
 import { optimizeArrangement } from './optimize.js';
 
 self.onmessage = ({ data }) => {
-  const { parcelLatLng, reqs, frontage, profile } = data;
+  const { parcelLatLng, reqs, frontage, profile, aiSeeds = [] } = data;
 
   const { ranked, totalTried } = optimizeArrangement(
     parcelLatLng, reqs, frontage, profile,
     (progress) => self.postMessage({ type: 'progress', ...progress }),
+    aiSeeds,
   );
 
   self.postMessage({ type: 'done', ranked, totalTried });

@@ -72,7 +72,7 @@ function layoutFromElements(elements) {
 // knobs: { layout, gapFt, parkingFaces, driveways, basinCorner, setbackFt, alignU }
 //   parkingFaces — string like 'front' or 'front+rear'; split on '+' to get face list
 //   driveways    — array of entryU strings for this candidate, e.g. ['left','right']
-function buildCandidateSchema(reqs, frontage, knobs) {
+export function buildCandidateSchema(reqs, frontage, knobs) {
   const { layout, gapFt, parkingFaces, driveways, basinCorner, setbackFt, alignU } = knobs;
   const elements = [];
   if (reqs.buildings.length === 0) return { frontage, elements, _knobs: knobs };
@@ -265,6 +265,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
           maxScore: result.maxScore,
           terms:    result.terms,
           feasible: true,
+          source:   'grid',
         });
       }
     }
@@ -273,11 +274,21 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
   return { candidates, tried };
 }
 
-// Main entry point for Phase 1.
+// Stable string key for a knob-set — used to deduplicate AI seeds against grid candidates.
+// driveways array is sorted so ['right','left'] and ['left','right'] hash identically.
+function knobSig(k) {
+  const dw = Array.isArray(k.driveways) ? [...k.driveways].sort().join(',') : String(k.driveways);
+  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}`;
+}
+
+// Main entry point for Phases 1 + 2.
 // Returns { ranked, totalTried } where ranked is sorted by total descending
 // and contains only feasible candidates (all elements feasible:true).
 // Frontage is held fixed — it is NEVER a search dimension.
-export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null) {
+// aiSeeds: pre-validated knob-sets from proposeArrangements (main thread).
+//   Scored first, deduped against Phase 1 grid via knobSig. Pass [] to get
+//   a run identical to today's deterministic search.
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = []) {
   const searchConfig   = profile.searchConfig;
   const parcelFt       = latLngToFeet(parcelLngLat);
   const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
@@ -285,6 +296,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
   const ranked = [];
   let totalTried = 0;
   let currentBest = null;
+  const seenSigs = new Set(); // dedup AI seeds against Phase 1 grid candidates
 
   function notifyIfBetter(candidate) {
     if (!onProgress) return;
@@ -313,8 +325,39 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
   turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
 
   try {
+    // AI seeds — knob-sets proposed by proposeArrangements on the main thread.
+    // Scored through the identical realize→gate→score path as grid candidates.
+    // The turf monkey-patch above applies here too (coincident-edge JSTS bug).
+    for (const knobs of aiSeeds) {
+      const sig = knobSig(knobs);
+      if (seenSigs.has(sig)) continue;
+      seenSigs.add(sig);
+      totalTried++;
+      const schema = buildCandidateSchema(reqs, frontage, knobs);
+      let elements;
+      try {
+        ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+      } catch (_) { continue; }
+      if (elements.some(e => !e.feasible)) continue;
+      const layout = layoutFromElements(elements);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+      const candidate = {
+        schema, layout,
+        total:    result.total,
+        maxScore: result.maxScore,
+        terms:    result.terms,
+        feasible: true,
+        source:   'ai',
+      };
+      ranked.push(candidate);
+      notifyIfBetter(candidate);
+    }
+
     // Phase 1: exhaustive discrete cross-product search.
     for (const schema of generateCandidates(reqs, frontage, searchConfig)) {
+      const sig = knobSig(schema._knobs);
+      if (seenSigs.has(sig)) continue; // already scored via AI seed — skip
+      seenSigs.add(sig);
       totalTried++;
 
       let elements;
@@ -340,6 +383,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
         maxScore: result.maxScore,
         terms:    result.terms,
         feasible: true,
+        source:   'grid',
       };
       ranked.push(candidate);
       notifyIfBetter(candidate);

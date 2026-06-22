@@ -169,6 +169,19 @@ button {
 .opt-candidate-winner .opt-score { color: #4ade80; }
 .opt-candidate-active .opt-score { color: #0ea5e9; }
 .opt-unplaced { font-size: 0.68rem; color: #f87171; grid-column: 2 / -1; }
+.opt-ai-tag {
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 700;
+  background: rgba(20, 184, 166, 0.18);
+  color: #14b8a6;
+  border: 1px solid rgba(20, 184, 166, 0.35);
+  border-radius: 2px;
+  padding: 0 3px;
+  margin-right: 4px;
+  vertical-align: 1px;
+  letter-spacing: 0.03em;
+}
 
 #status { font-size: 0.8rem; color: #6b7280; }
 
