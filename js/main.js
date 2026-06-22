@@ -5,8 +5,9 @@ import { solveLayout } from './solver.js';
 import { renderLayoutOnCanvas } from './render.js';
 import { exportToPng } from './export.js';
 import { parseInstructions, proposeArrangements } from './ai.js';
+import { detectRoad } from './road.js';
 import { score, PROFILES } from './score.js';
-import { optimizeLayout, optimizeArrangement } from './optimize.js';
+import { optimizeLayout, optimizeArrangement, scoreAiSeeds, knobSig } from './optimize.js';
 import { realizeArrangement } from './arrange.js';
 
 // Routes onSolve through realizeArrangement (Phase D/E arranger).
@@ -36,6 +37,8 @@ let setbackOverlay = null;
 let solveOverlays = [];
 let lastLayout = null;
 let aiHints = {};
+let detectedRoad = null;
+let roadOverlay  = null;
 
 // Schema optimizer worker state
 let optimizerWorker = null;
@@ -94,6 +97,37 @@ function onBoundaryClosed(pts) {
   document.getElementById('status').textContent =
     `${pts.length} vertices captured. Click "Use Boundary" to confirm.`;
   drawSetback();
+
+  // Detect nearby road without blocking the UI. Capture pts/centroid in the closure
+  // so a concurrent Clear or redraw doesn't cause stale results to apply.
+  const snapPts = pts, snapCentroid = { ...centroid };
+  detectRoad(snapPts, snapCentroid).then(result => {
+    if (parcelLatLng !== snapPts) return; // boundary was cleared or redrawn — discard
+    detectedRoad = result;
+    const roadStatusEl = document.getElementById('road-status');
+    if (!result) {
+      roadStatusEl.textContent = 'No nearby road detected — set frontage manually.';
+      return;
+    }
+    // Pre-fill only when the user hasn't already chosen a direction.
+    if (document.getElementById('input-frontage').value === 'auto') {
+      document.getElementById('input-frontage').value = result.cardinal;
+    }
+    // Draw the detected road as a thin magenta polyline.
+    if (roadOverlay) { roadOverlay.setMap(null); }
+    const map = getMap();
+    if (map) {
+      roadOverlay = new google.maps.Polyline({
+        path:          result.line.geometry.coordinates.map(([lng, lat]) => ({ lat, lng })),
+        map,
+        strokeColor:   '#e879f9',
+        strokeWeight:  2,
+        strokeOpacity: 0.9,
+      });
+    }
+    roadStatusEl.textContent =
+      `Detected: ${result.cardinal} side (${Math.round(result.distanceFt)} ft away)`;
+  });
 }
 
 function onUseBoundary() {
@@ -496,10 +530,8 @@ async function onOptimize() {
 
     document.getElementById('btn-optimize').disabled = true;
     document.getElementById('btn-cancel-optimize').style.display = '';
-    document.getElementById('status').textContent = 'Proposing layouts…';
 
-    // Build a parcel summary for the AI proposer from the feet-space vertices
-    // already computed at boundary-close time (parcelFt is module-level state).
+    // Build parcel summary for the AI proposer.
     const pSqFt = polygonAreaSqFt(parcelFt);
     const _xs = parcelFt.map(p => p.x), _ys = parcelFt.map(p => p.y);
     const parcelSummary = {
@@ -507,20 +539,20 @@ async function onOptimize() {
       widthFt: Math.round(Math.max(..._xs) - Math.min(..._xs)),
       depthFt: Math.round(Math.max(..._ys) - Math.min(..._ys)),
     };
-    const aiSeeds = await proposeArrangements(parcelSummary, reqs, frontage, PROFILES.retail);
 
-    // Abort if the user hit Cancel or Solve during the Gemini call.
-    if (!document.getElementById('btn-optimize').disabled) return;
+    // Fire Gemini immediately — runs concurrently with the worker to hide latency.
+    // Three bias-variant prompts fire in parallel inside proposeArrangements.
+    const geminiPromise = proposeArrangements(parcelSummary, reqs, frontage, PROFILES.retail)
+      .catch(() => []);
 
-    document.getElementById('status').textContent = 'Optimizing…';
-
+    // Spawn worker with empty AI seeds — seeds are scored on the main thread
+    // after both the grid search and Gemini calls complete.
     optimizerWorker = new Worker('./js/optimizer-worker.js', { type: 'module' });
 
-    optimizerWorker.onmessage = (e) => {
+    optimizerWorker.onmessage = async (e) => {
       const { type } = e.data;
 
       if (type === 'progress') {
-        // New best found — render it live and update status.
         const { best, totalTried } = e.data;
         clearSolveOverlays();
         lastLayout = best.layout;
@@ -530,10 +562,24 @@ async function onOptimize() {
           `Optimizing… ${totalTried} tried · best so far: ${best.total.toFixed(2)}`;
 
       } else if (type === 'done') {
-        const { ranked, totalTried } = e.data;
+        const { ranked: gridRanked, totalTried: gridTried } = e.data;
         optimizerWorker = null;
         document.getElementById('btn-cancel-optimize').style.display = 'none';
+
+        // Await AI seeds — likely already resolved since Gemini ran concurrently with the
+        // worker. Keep btn-optimize disabled until we have the seeds so the button state
+        // is consistent. The turf monkey-patch for JSTS coincident-edge errors is applied
+        // inside scoreAiSeeds, same as in the worker's optimizeArrangement.
+        const aiSeeds      = await geminiPromise;
         document.getElementById('btn-optimize').disabled = false;
+
+        const aiCandidates = scoreAiSeeds(aiSeeds, parcelLatLng, reqs, frontage, PROFILES.retail);
+
+        // Merge: add AI candidates whose knob signature doesn't duplicate a grid result.
+        const gridSigs = new Set(gridRanked.map(c => knobSig(c.schema._knobs)));
+        const newAi    = aiCandidates.filter(c => !gridSigs.has(knobSig(c.schema._knobs)));
+        const ranked   = [...gridRanked, ...newAi].sort((a, b) => b.total - a.total);
+        const totalTried = gridTried + aiCandidates.length;
 
         if (ranked.length === 0) {
           document.getElementById('status').textContent =
@@ -548,9 +594,10 @@ async function onOptimize() {
         renderLayout(best.layout, reqs, true, frontage);
         showSchemaOptimizerResult(ranked);
         document.getElementById('btn-render').disabled = false;
-        const k = best.schema._knobs;
+        const k      = best.schema._knobs;
+        const aiNote = newAi.length ? ` · ${newAi.length} AI` : '';
         document.getElementById('status').textContent =
-          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried` +
+          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}` +
           ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}`;
       }
     };
@@ -563,7 +610,8 @@ async function onOptimize() {
       document.getElementById('status').textContent = 'Optimizer error: ' + err.message;
     };
 
-    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds });
+    // Worker runs the grid search only (aiSeeds: [] — AI seeds scored on main thread).
+    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds: [] });
     return;
   }
 
@@ -696,6 +744,9 @@ function onClear() {
   aiHints = {};
   clearSolveOverlays();
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }
+  if (roadOverlay)    { roadOverlay.setMap(null);    roadOverlay = null; }
+  detectedRoad = null;
+  document.getElementById('road-status').textContent = '';
   document.getElementById('btn-use-boundary').disabled = true;
   document.getElementById('btn-solve').disabled = true;
   document.getElementById('btn-optimize').disabled = true;

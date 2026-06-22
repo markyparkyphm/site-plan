@@ -276,9 +276,59 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
 
 // Stable string key for a knob-set — used to deduplicate AI seeds against grid candidates.
 // driveways array is sorted so ['right','left'] and ['left','right'] hash identically.
-function knobSig(k) {
+export function knobSig(k) {
   const dw = Array.isArray(k.driveways) ? [...k.driveways].sort().join(',') : String(k.driveways);
   return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}`;
+}
+
+// Score AI knob-sets on the main thread with the same turf monkey-patch used inside the
+// worker. Deduplicates internally. Returns feasible candidate objects tagged source:'ai'.
+// Called from main.js after the worker finishes, to merge AI seeds into the ranked list.
+export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile) {
+  if (!seeds.length) return [];
+
+  const parcelFt       = latLngToFeet(parcelLngLat);
+  const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
+
+  const origUnion      = turf.union;
+  const origDifference = turf.difference;
+  const origIntersect  = turf.intersect;
+  turf.union      = (a, b) => { try { return origUnion(a, b);      } catch (_) { return null; } };
+  turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
+  turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
+
+  const candidates = [];
+  const seenSigs   = new Set();
+
+  try {
+    for (const knobs of seeds) {
+      const sig = knobSig(knobs);
+      if (seenSigs.has(sig)) continue;
+      seenSigs.add(sig);
+      const schema = buildCandidateSchema(reqs, frontage, knobs);
+      let elements;
+      try {
+        ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+      } catch (_) { continue; }
+      if (elements.some(e => !e.feasible)) continue;
+      const layout = layoutFromElements(elements);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+      candidates.push({
+        schema, layout,
+        total:    result.total,
+        maxScore: result.maxScore,
+        terms:    result.terms,
+        feasible: true,
+        source:   'ai',
+      });
+    }
+  } finally {
+    turf.union      = origUnion;
+    turf.difference = origDifference;
+    turf.intersect  = origIntersect;
+  }
+
+  return candidates;
 }
 
 // Main entry point for Phases 1 + 2.
