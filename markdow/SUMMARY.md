@@ -66,6 +66,7 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | Schema optimizer Phase 3: Web Worker off main thread, streaming best-so-far on progress, step-through ranked list (displayK=10 clickable rows), cancel button | js/optimizer-worker.js (new) + js/optimize.js + js/main.js + js/score.js + index.html + styles.css | — | ✅ |
 | AI Schema-Proposer Phase 1: proposeArrangements (Gemini knob-set proposals, main-thread, 4 s timeout, AbortController), aiSeeds merge into ranked list tagged source:'ai', knobSig dedup vs grid, opt-ai-tag badge in UI | js/ai.js + js/optimize.js + js/optimizer-worker.js + js/main.js + styles.css | — | ✅ |
 | Fix maxScore computation in score.js: sum scoring term weights only (not all profile values) — was 600.15, now correctly 4.15 for retail | js/score.js | — | ✅ (on disk, not yet committed) |
+| AI Schema-Proposer Phase 2: 3 bias templates (visibility/parking/compact) fired concurrently via Promise.allSettled; Gemini runs parallel to worker (not sequential) to hide latency; richer parcel description (aspect ratio + shape note); AI seeds scored on main thread via scoreAiSeeds export; knobSig exported; debug console.log removed; status shows "· N AI" count | js/ai.js + js/optimize.js + js/main.js | — | ✅ |
 
 ---
 
@@ -1098,17 +1099,44 @@ Commit: 6767a1f
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | proposeArrangements (main thread, Gemini 2.5 Flash, 5 knob-sets), aiSeeds merge into ranked list via identical realize→gate→score pipeline, knobSig dedup, opt-ai-tag badge, 4 s timeout | ✅ Done |
-| 2 | Bias variants + concurrency: fire Gemini concurrently with deterministic worker to hide latency; multiple prompt templates for diverse proposals | Not started |
+| 2 | 3 bias templates (visibility/parking/compact) via Promise.allSettled; Gemini fires concurrently with worker; seeds scored on main thread via scoreAiSeeds; richer parcel description (aspect + shape note) | ✅ Done |
 | Deploy | Backend proxy for Gemini key; rotate keys; lock Maps key with HTTP-referrer restriction | Not started |
+
+## Road Detection (`js/road.js`) — Phase 1 COMPLETE
+
+New `js/road.js`: exports `roadConfig` (all knobs) and `async detectRoad(parcelLatLng, centroid) → roadResult | null`. Never throws.
+
+Queries Overpass `way["highway"]` within parcel bbox expanded by `bboxMarginFt` (150 ft), converted ft→degrees via `computeScaleFactors`. Filters pedestrian types (`highwayExclude`). Picks nearest road that passes the parallelism gate (road-segment bearing vs nearest parcel-edge bearing, folded 0–90, must be ≤ `maxBearingDiffDeg` 35°). Snaps centroid→nearestPt bearing to N/E/S/W. Returns `{ cardinal, line, nearestPt, distanceFt, bearingDiffDeg, source:'overpass' }` or `null`.
+
+Wired in `main.js`:
+- `onBoundaryClosed` fires `detectRoad` async after centroid is set; stale-result guard via `parcelLatLng !== snapPts`; pre-fills `#input-frontage` only if currently `'auto'`; draws thin magenta `google.maps.Polyline`.
+- `onClear` removes `roadOverlay` and nulls `detectedRoad`.
+
+### Road Detection bugs fixed
+
+**Bug 1: centroid→road distance too large for big parcels (Hwy 60 parcel)**
+Distance gate used `nearest.properties.dist` (centroid→road). For a 20+ acre parcel the centroid is 400–600 ft from the edge, exceeding `maxDistFt: 300` even when the road is right on the parcel boundary.
+**Fix:** Changed gate to `edgeDist = Math.min(...parcelPts.map(pt => turf.nearestPointOnLine(road, pt).properties.dist))` — minimum distance from any parcel vertex to the road. Cardinal snap still uses centroid→nearestPt bearing (correct per spec).
+
+**Bug 2: road-status overwritten by "Boundary confirmed" (all parcels)**
+Detection result was written to `#status`, which `onUseBoundary` overwrites immediately.
+**Fix:** Added dedicated `<div id="road-status">` in `index.html` under the Road Frontage dropdown. Detection writes there; status bar is unaffected.
+
+**Bug 3: `distFt` ReferenceError — all roads silently dropped (Addicks Dam Rd parcel)**
+After the vertex-distance-gate refactor (Bug 1), the original variable `distFt` was removed. But line 114 still referenced it in the `best` comparison:
+```javascript
+if (!best || distFt < best.distanceFt) {   // ← distFt is not defined
+  best = { road, nearest, distanceFt: distFt, ... };
+}
+```
+Every road that survived both gates threw `ReferenceError: distFt is not defined`. The outer `catch {}` swallowed it silently → returned null for any parcel with a nearby parallel road. The Overpass query was working correctly the entire time.
+**Fix:** `const centroidDistFt = nearest.properties.dist;` and use `centroidDistFt` in the comparison and result object. Also changed `catch {}` → `catch (e) { console.warn('[road.js] detectRoad failed:', e); }` so future silent failures surface in DevTools.
 
 ## Pending tasks
 
-- **Diagnose AI badge issue**: User reported no `AI` badge rows after testing Phase 1 on Live Server. Check DevTools console for `[AI proposer] seeds returned:` log line:
-  - `0 []` = GEMINI_API_KEY missing/not set in config.js, or 4 s timeout fired, or API error
-  - `5 [...]` but no badge = all 5 seeds failed the feasibility gate inside the worker (check parcel vs. program size)
-  - Error in console = API quota or malformed response
-- **Remove temp debug console.log** from `js/main.js` once AI badges are confirmed working (`console.log('[AI proposer] seeds returned:', aiSeeds.length, aiSeeds)` in `onOptimize`)
 - **Commit the score.js maxScore fix** — `Object.values(terms).reduce(...)` change is on disk but not committed
+- **Test AI badges in Phase 2**: Run Optimize, check DevTools console. 3 Gemini requests fire concurrently. Status bar shows `· N AI` if any AI seeds passed the feasibility gate and weren't duplicates of grid candidates.
+- **Test road detection Phase 1**: Draw parcel near a road → boundary close triggers Overpass (~2–8 s) → frontage dropdown pre-fills → magenta polyline appears. Also test null path (parcel far from roads) and the parallelism gate (cross-street should be rejected). Three bugs are now fixed (centroid distance, road-status overwrite, `distFt` ReferenceError) — the Addicks Dam Rd east-side case should now detect correctly.
 
 ---
 
