@@ -11,7 +11,7 @@ satellite imagery background and exports as PNG.
 
 ## Current status
 
-All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–D COMPLETE.
+All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–E + Schema Optimizer Phases 1–3 COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -58,8 +58,12 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | arrange.js Phase B: parking → building face, stall-count sizing, clip-to-free | js/arrange.js | fd55d90 | ✅ |
 | arrange.js Phase C: driveway connects parcelFrontage → parking, entryU | js/arrange.js | fd55d90 | ✅ |
 | USE_ARRANGER = true (arranger is live for Solve button) | js/main.js | fd55d90 | ✅ |
-| arrange.js Phase D: group/strip, childToGroup topo-sort, scanGroupPlacement, parking clearance fix, driveway vTarget fix, bSetbackFt, error handling | js/arrange.js + js/main.js | 49a2606 | ✅ |
-| arrange.js Phase E: basin → parcelCorner, semantic corner names, cardinal passthrough, full schema round-trip | js/arrange.js + js/main.js + js/solver.js | — | ✅ |
+| arrange.js Phase D: group/strip, childToGroup topo-sort, scanGroupPlacement, parking clearance fix, driveway vTarget fix, bSetbackFt | js/arrange.js + js/main.js | c4bafb8 | ✅ |
+| arrange.js Phase E: basin → parcelCorner, semantic corner names, cardinal passthrough, pondPct=0 bug fix | js/arrange.js + js/main.js | b084610 | ✅ |
+| Schema optimizer Phase 1: optimizeArrangement, generateCandidates, buildCandidateSchema, layoutFromElements | js/optimize.js + js/score.js + js/main.js | b520168 | ✅ |
+| Fix optimizer crash on Turf geometry errors (per-candidate try/catch + turf monkey-patch) | js/optimize.js | 6767a1f | ✅ |
+| Schema optimizer Phase 2: local refinement — fine setbackFt grid + numeric alignU offsets around top-K Phase 1 winners; export buildLocalFrame; alignU numeric support in realizeBuilding + realizeGroup | js/optimize.js + js/arrange.js + js/score.js + js/main.js | — | ✅ |
+| Schema optimizer Phase 3: Web Worker off main thread, streaming best-so-far on progress, step-through ranked list (displayK=10 clickable rows), cancel button | js/optimizer-worker.js (new) + js/optimize.js + js/main.js + js/score.js + index.html + styles.css | — | ✅ |
 
 ---
 
@@ -72,7 +76,8 @@ config.js           API keys — GITIGNORED, never commit
 config.example.js   Safe shape reference
 SCORING.md          Spec for score.js (implemented)
 OPTIMIZER_TASK.md   Spec for optimize.js (implemented)
-relational-placement-spec.md  Spec for arrange.js (Phases A–C done; D–E pending)
+schema-optimizer-spec.md  Spec for optimizeArrangement Phase 1–3 (Phase 1 done)
+relational-placement-spec.md  Spec for arrange.js (Phases A–E all done)
 js/
   main.js           App state + wires UI events → solver → renderer → scorer
   map.js            Google Maps init, click-to-draw polygon sketching
@@ -85,9 +90,10 @@ js/
   export.js         exportToPng()
   ai.js             parseInstructions(text) → hints via Gemini 2.5 Flash
   score.js          score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
-                    PROFILES.retail — scoring weights + placement defaults
-  optimize.js       optimizeLayout(...) — 4 basin corners, keep highest score
-  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phases A–D
+                    PROFILES.retail — scoring weights + placement defaults + searchConfig
+  optimize.js       optimizeLayout(...) — legacy 4 basin corners (USE_SCHEMA_OPTIMIZER=false)
+                    optimizeArrangement(...) — Phase 1 schema optimizer (LIVE)
+  arrange.js        realizeArrangement(schema, parcelLngLat, profile) — Phases A–E all done
 ```
 
 ---
@@ -103,9 +109,9 @@ aiHints       // accumulated hints from AI (merged on each Apply AI Hints click)
               // NOTE: aiHints.frontage is NOT read directly in onSolve —
               // onApplyAI writes it into the #input-frontage dropdown instead.
 
-const USE_ARRANGER = true;  // Arranger is LIVE — onSolve routes through
-                             // realizeArrangement (Phases A–C). Optimizer always
-                             // uses solveLayout directly, unaffected by this flag.
+const USE_ARRANGER        = true;  // Solve button routes through realizeArrangement (Phase E)
+const USE_SCHEMA_OPTIMIZER = true;  // Optimize button routes through optimizeArrangement Phase 1
+                                    // Set false to fall back to legacy 4-basin-corner search
 ```
 
 ---
@@ -142,8 +148,8 @@ hints = {
 ```
 
 **This layout shape is the contract.** render.js and score.js both consume it.
-The arranger adapter `layoutFromArrangement(elements)` in main.js converts
-`realizeArrangement` output into this same shape so the display pipeline is unchanged.
+`layoutFromElements` in optimize.js and `layoutFromArrangement` in main.js both
+convert `realizeArrangement` output into this same shape.
 
 ---
 
@@ -184,6 +190,25 @@ stallDepthFt:         18    // parking stall depth
 aisleFt:              24    // parking aisle width
 drivewayWidthFt:      24    // driveway strip width
 gapFt:                10    // gap between elements (parking → free subtraction)
+
+// Schema-optimizer search config (added for Phase 1 — all value-sets live here, NOT in optimize.js)
+searchConfig: {
+  layout:        ['strip'],
+  gapFt:         [0, 20],
+  parkingFaces:  ['front'],
+  driveways:     [['left'], ['center'], ['right'], ['left', 'right']],
+  basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
+  setbackFt:     [15, 25, 35],
+  alignU:        ['left', 'center', 'right'],
+  maxCandidates: 500,
+  topK:          4,    // Phase 2 refines around this many Phase 1 winners
+  displayK:      10,   // rows shown in the step-through optimizer panel (Phase 3)
+  refineConfig: {
+    setbackStep:    2,                      // ft between fine setback samples
+    setbackRange:   9,                      // ±ft around Phase 1 winner value
+    alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+  },
+}
 ```
 
 Max score for retail = sum of positive weights = 1.0+0.9+0.7+0.6+0.5+0.3+0.15 = **4.15**.
@@ -224,50 +249,233 @@ const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, 
 
 ---
 
-## optimize.js — Brute-force optimizer
+## optimize.js — Schema optimizer (Phases 1–3) + legacy optimizer
 
-### API
+### Legacy optimizer (behind USE_SCHEMA_OPTIMIZER = false)
 ```javascript
-import { optimizeLayout } from './optimize.js';
-
-const { best, all } = optimizeLayout(
-  parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage
-);
-// best: { params: {basinCorner}, layout, total, maxScore, breakdown, unplaced }
-// all: array of all 4 candidates sorted by score descending
+export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage)
+// Tries 4 basin corners (SW/SE/NW/NE), scores each, returns { best, all }.
+// frontage is FIXED — never searched. Hard architectural rule.
 ```
 
-### Key constraint: frontage is FIXED
-`frontage` is passed in already resolved and held constant across all 4 candidates.
-It is NEVER a search dimension. The scorer's frontage-relative terms trust frontage
-completely — if frontage were searched, the optimizer could pick the edge facing away
-from the real road. This is the hard architectural rule.
+### Schema optimizer Phases 1–3 — `optimizeArrangement`
 
-### Search space
-4 basin corners (SW, SE, NW, NE) × 1 orientation (NS only — orientation is currently
-inert in the solver; adding EW would double the work for zero current benefit).
-= **4 solves per optimize call**.
-
-### `baseHints` (what the optimizer injects vs. what it searches)
+**Entry point:**
 ```javascript
-baseHints = {
-  setbackFt:   ...,   // from UI
-  clearanceFt: ...,   // from aiHints
-  // NO basinCorner — searched
-  // NO orientationPreference — inert, omitted
-  // NO frontage — passed separately and held fixed
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null)
+// Returns { ranked, totalTried }
+// ranked: array of { schema, layout, total, maxScore, terms, feasible:true } sorted by total desc
+// totalTried: count of all candidates attempted across Phase 1 + Phase 2 (including infeasible ones)
+//
+// onProgress(callback): called whenever a new best candidate is found during the search.
+//   callback receives { best: candidate, totalTried }
+//   Used by the Web Worker (Phase 3) to stream progress to the main thread.
+//   Pass null (default) for the synchronous/legacy path.
+```
+
+**Phase 1 search space (current searchConfig):**
+- 1 layout (strip) × 2 gapFt × 1 parkingFaces (front) × 4 drivewaySets × 4 basinCorners × 3 setbackFts × 3 alignUs
+- = **288 candidates**, well under maxCandidates=500
+
+**Phase 2 — `refineArrangement(topKWinners, ...)` (internal):**
+After Phase 1 ranking, takes top-K winners and refines two continuous knobs:
+- **setbackFt**: fine grid ±`refineConfig.setbackRange` (9 ft) in `refineConfig.setbackStep` (2 ft) steps around each winner's value, skipping Phase 1 values already tried → ~9 new setback values per winner
+- **alignU (numeric)**: converts the winner's string `alignU` to a base u-coordinate in local feet, then tries `refineConfig.alignOffsetsFt` ([-60,-30,0,30,60] ft) offsets → 5 numeric u-positions per winner
+
+Per-winner candidate count: ~9 setbacks × 5 alignU = ~45 candidates × topK=4 winners = **~180 Phase 2 candidates**.
+
+`buildCandidateSchema` accepts numeric `alignU` (passes it to the schema's `place` spec).
+`realizeBuilding` and `realizeGroup` both support numeric `alignU` as a direct local-frame u-coordinate (feet from parcel centroid along t̂). Groups: numeric `alignU` becomes `startU` for `scanGroupPlacement` (previously ignored for groups).
+
+**Phase 2 `refineConfig` (in `profile.searchConfig`):**
+```javascript
+refineConfig: {
+  setbackStep:    2,                      // ft between fine setback samples
+  setbackRange:   9,                      // ±ft around Phase 1 winner value
+  alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+}
+```
+
+**`buildCandidateSchema(reqs, frontage, knobs)`:**
+Assembles one arrangement schema from a knob-value point. Computes `bSetbackFt = setbackFt + parkDepthFt`
+so the building is pushed back far enough for front parking to fit between road and building face.
+Single building → individual element; multiple buildings → strip group with children.
+
+**`*generateCandidates(reqs, frontage, searchConfig)`:**
+Generator that yields one schema per cross-product point. Caps at `maxCandidates`. All
+value-sets come from `searchConfig` (in the profile), not hardcoded.
+
+**`layoutFromElements(elements)`:**
+Adapts `realizeArrangement` output to the `layout` shape `score.js` expects.
+Identical logic to `layoutFromArrangement` in main.js but lives in optimize.js
+so optimizeArrangement is self-contained.
+
+**Feasibility gate:**
+```javascript
+if (elements.some(e => !e.feasible)) continue;  // disqualify — do not score
+```
+
+**`notifyIfBetter` (internal helper inside `optimizeArrangement`):**
+```javascript
+let currentBest = null;
+function notifyIfBetter(candidate) {
+  if (!onProgress) return;
+  if (!currentBest || candidate.total > currentBest.total) {
+    currentBest = candidate;
+    onProgress({ best: candidate, totalTried });
+  }
+}
+```
+Called after each feasible Phase 1 candidate is pushed to `ranked`, and for each Phase 2
+candidate (Phase 2 push is now a loop, not `...spread`, so it can call `notifyIfBetter`
+per candidate). Only fires when a new best is found — typically 5–15 events per full run.
+
+**Turf monkey-patch (critical for multi-building scenarios):**
+```javascript
+// Applied at the start of optimizeArrangement, restored in finally:
+turf.union      = (a, b) => { try { return origUnion(a, b);      } catch (_) { return null; } };
+turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
+turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
+```
+WHY: With multi-building groups, the group's bounding-box clearance buffer and the first
+child's clearance buffer (used in `realizeParking`'s `turf.union(free, clearRing)`) share
+EXACTLY coincident boundary segments. JSTS's ring-traversal algorithm throws
+"Unable to complete output ring" on these. Arrange.js already has `?? free` / `?? null`
+fallbacks for all these calls — they just never reached them because the throw propagated
+first. The monkey-patch makes them return null instead of throwing, so the existing
+fallbacks kick in (parking clips to a slightly smaller zone) and candidates remain feasible.
+`finally` always restores the originals — nothing outside `optimizeArrangement` is affected.
+
+**IMPORTANT for the Web Worker (Phase 3):** The worker imports Turf as an ES module namespace
+which is frozen (read-only properties). The worker spreads it into a plain mutable object
+(`globalThis.turf = { ...turfNS }`) so the monkey-patch can reassign `turf.union` etc.
+If this spread is missing, the monkey-patch silently fails and multi-building runs throw.
+
+**Per-candidate safety net:**
+```javascript
+try {
+  ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+} catch (_) {
+  continue;  // skip any unexpected throws (e.g. turf.buffer on malformed geometry)
+}
+```
+
+---
+
+### Phase 3 — Web Worker (`js/optimizer-worker.js`)
+
+**Why a worker:** Phase 1+2 search (~468 candidates × ~20ms each on a typical parcel)
+blocks the main thread for several seconds. Moving it to a worker keeps the map and sidebar
+interactive while the search runs and enables streaming best-so-far renders.
+
+**Worker file: `js/optimizer-worker.js`**
+```javascript
+// Module worker — importScripts() is NOT available in module workers.
+// Turf must be imported as ESM and spread into a mutable plain object
+// so the monkey-patch inside optimizeArrangement can reassign turf.union etc.
+import * as turfNS from 'https://esm.sh/@turf/turf@6.5.0';
+globalThis.turf = { ...turfNS };  // mutable plain object — frozen namespace won't work
+
+import { optimizeArrangement } from './optimize.js';
+
+self.onmessage = ({ data }) => {
+  const { parcelLatLng, reqs, frontage, profile } = data;
+  const { ranked, totalTried } = optimizeArrangement(
+    parcelLatLng, reqs, frontage, profile,
+    (progress) => self.postMessage({ type: 'progress', ...progress }),
+  );
+  self.postMessage({ type: 'done', ranked, totalTried });
 };
-// Each candidate uses: { ...baseHints, basinCorner, frontage }
 ```
 
-### Optimizer UI in main.js
-- `onOptimize()`: reads frontage dropdown, builds baseHints + reqs, calls optimizeLayout,
-  calls `renderLayout(best.layout, reqs, true, frontage)`, then `showOptimizerResult(best, all)`.
-- `showOptimizerResult(best, all)`: populates `#optimizer-panel` with winner label +
-  ranked candidate rows (green highlighted for rank #1, red for unplaced buildings).
-- Regular `onSolve` hides the optimizer panel (stale results cleared).
-- `onClear` hides and disables everything.
-- **Note:** Optimize always uses `solveLayout` (not the arranger) — `USE_ARRANGER` has no effect on it.
+**Worker message protocol:**
+- Main → worker: `{ parcelLatLng, reqs, frontage, profile }` via `postMessage`
+  - `profile` = `PROFILES.retail` — all primitives/arrays, fully structured-cloneable ✓
+  - Turf polygon results in `ranked` are GeoJSON (plain objects) — also cloneable ✓
+- Worker → main (`type: 'progress'`): `{ type, best: candidate, totalTried }`
+  - Fired only on new best — typically 5–15 times per full run
+  - Main thread renders `best.layout` live on the map (streaming best-so-far)
+- Worker → main (`type: 'done'`): `{ type, ranked, totalTried }`
+  - Fired once when both Phase 1 and Phase 2 are complete
+
+**Worker creation:** `new Worker('./js/optimizer-worker.js', { type: 'module' })`
+Requires page served over HTTP (Live Server ✓). Does not work from `file://`.
+
+---
+
+### Optimizer UI in main.js (Phase 3 schema optimizer path)
+
+**Module-level state added for Phase 3:**
+```javascript
+let optimizerWorker = null;  // reference to running Worker, or null
+let lastRanked      = [];    // full ranked array from last completed run
+let lastReqs        = null;  // reqs at time of last optimize click (for step-through renders)
+let lastFrontage    = 'S';   // frontage at time of last optimize click
+```
+
+**`onOptimize` flow (USE_SCHEMA_OPTIMIZER = true):**
+1. If a worker is already running, terminate it first (user hit Optimize again)
+2. Store `lastReqs` and `lastFrontage` for step-through click handlers
+3. Disable "Optimize Layout" button, show "Cancel Optimization" button
+4. Spawn new worker via `new Worker('./js/optimizer-worker.js', { type: 'module' })`
+5. `worker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail })`
+6. On `progress` message: `clearSolveOverlays()`, render `best.layout` live, update status text
+7. On `done` message: restore buttons, populate `lastRanked`, render winner, call `showSchemaOptimizerResult(ranked)`
+8. On `onerror`: restore buttons, log to console, show error in status bar
+
+**`onCancelOptimize`:**
+```javascript
+function onCancelOptimize() {
+  if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
+  document.getElementById('btn-cancel-optimize').style.display = 'none';
+  document.getElementById('btn-optimize').disabled = false;
+  document.getElementById('status').textContent = 'Optimization cancelled.';
+}
+```
+
+**Worker lifecycle rules:**
+- `onSolve`: terminates worker (user switching to manual solve), restores optimize button
+- `onClear`: terminates worker, hides cancel button, resets `lastRanked`/`lastReqs`
+- `onOptimize`: terminates any existing worker before spawning a new one
+
+**`showSchemaOptimizerResult(ranked)` (Phase 3 version):**
+- Shows `searchConfig.displayK` (10) rows instead of `topK` (4)
+- Winner row starts with both `opt-candidate-winner` and `opt-candidate-active` classes
+- Each row has a click handler for **step-through**:
+  ```javascript
+  row.addEventListener('click', () => {
+    container.querySelectorAll('.opt-candidate').forEach(r => r.classList.remove('opt-candidate-active'));
+    row.classList.add('opt-candidate-active');
+    clearSolveOverlays();
+    lastLayout = c.layout;
+    renderLayout(c.layout, lastReqs, true, lastFrontage);
+  });
+  ```
+  Clicking any row clears the map and renders that candidate's layout. The score breakdown
+  panel updates too (via `renderLayout`). The clicked row highlights in blue
+  (`opt-candidate-active`), winner row stays green (`opt-candidate-winner`).
+
+**`fmtAlignU(alignU)` helper (added in Phase 2, used here):**
+```javascript
+function fmtAlignU(alignU) {
+  if (typeof alignU !== 'number') return alignU;
+  return `u${alignU >= 0 ? '+' : ''}${Math.round(alignU)}ft`;
+}
+```
+Formats Phase 2 numeric alignU values (e.g. `-42` → `u-42ft`) in the optimizer panel rows
+and status bar. String values ('left', 'center', 'right') pass through unchanged.
+
+**Cancel button in `index.html`:**
+```html
+<button id="btn-cancel-optimize" style="display:none">Cancel Optimization</button>
+```
+Placed directly after `btn-optimize`. Shown only while a worker is running.
+
+**`searchConfig` keys relevant to UI:**
+```javascript
+topK:     4,   // Phase 2 refines around this many Phase 1 winners
+displayK: 10,  // rows shown in the step-through optimizer panel
+```
 
 ---
 
@@ -276,7 +484,7 @@ baseHints = {
 ### Spec file
 `relational-placement-spec.md` — read this before implementing any phase.
 
-### Current status: Phases A–D COMPLETE (Phase D completed 2026-06-18)
+### Current status: ALL Phases A–E COMPLETE
 
 ### Entry point
 ```javascript
@@ -287,7 +495,7 @@ const { elements, freeRemaining } = realizeArrangement(schema, parcelLngLat, pro
 // freeRemaining: Turf polygon of remaining free space after placement
 ```
 
-### Schema format (what AI / optimizer will eventually emit)
+### Schema format (what main.js buildTestSchema emits)
 ```json
 {
   "frontage": "S",
@@ -344,6 +552,17 @@ Dependencies extracted from `place.anchor`, `place.to`, `place.connects` (exclud
 parcel-level anchors: `parcelFrontage`, `parcelCorner`). DFS topo-sort; cycle → all
 involved elements return `{feasible: false, reason: 'Dependency cycle'}`.
 
+**`childToGroup` map** (built before topoSort):
+When parking anchors to a group child (e.g. `anchor: "A"` where A is inside group g1),
+the dependency resolves to the parent group so topo-sort places g1 before p1.
+```javascript
+const childToGroup = {};
+for (const el of schema.elements) {
+  if (el.type === 'group' && el.children)
+    for (const child of el.children) childToGroup[child.id] = el.id;
+}
+```
+
 ---
 
 ### Phase A — realizeBuilding (anchor: 'parcelFrontage' only)
@@ -361,9 +580,6 @@ bSpec = {
 }
 ```
 
-**For a 200×100 ft building in the existing UI:** areaSqFt=20000, maxDepthFt=100 →
-depthFt=100, faceFt=200 → bSpec: length_ft=200, width_ft=100. Exact round-trip. ✓
-
 **Target point derivation:**
 ```javascript
 vFront    = frontageV(parcelFt, frame)       // v-coord of frontage edge
@@ -378,7 +594,6 @@ For `alignU: 'left'|'right'`: targetU = parcel u-extent min/max ± (setbackFt + 
 **Placement:**
 ```javascript
 const placed = placeBuilding(free, bSpec, targetPt, [0, 90], centroid);
-// erodes free by reach, grids legal space, snaps to closest candidate to targetPt
 ```
 
 **Free space update:**
@@ -425,16 +640,19 @@ depthFt       = rows * stallRowDepth
 vFace = ab.vMin  // front face of building (face: 'front')
 vNear = vFace - depthFt  // parking extends toward road
 vFar  = vFace            // parking touches building face
-
-// 4 corners unproject: localToFeet(u,v,frame) → feetToLatLngFromCentroid(ft, centroid)
 ```
 
-**Clip to `free` (parking tolerates partial coverage):**
+**Parking clearance restore (critical):**
+Before clipping parking to `free`, restore the anchor building's own clearance zone
+back into free so parking is allowed to occupy that zone:
 ```javascript
-const clipped = turf.intersect(free, parkRect);
-actualSqFt    = turf.area(clipped) * 10.7639;
-actualStalls  = floor(actualSqFt / 325);
-// Attach .properties = { center_x_ft, center_y_ft, orientation_deg: 0, stall_count }
+const anchorFoot = rectPoly(anchorEl.center_x_ft, anchorEl.center_y_ft,
+                            anchorEl.length_ft, anchorEl.width_ft,
+                            anchorEl.orientation_deg ?? 0, centroid);
+const anchorBuf  = turf.buffer(anchorFoot, clearanceFt, { units: 'feet' });
+const clearRing  = anchorBuf ? (turf.difference(anchorBuf, anchorFoot) ?? anchorBuf) : null;
+const freeForPark = clearRing ? (turf.union(free, clearRing) ?? free) : free;
+const clipped = turf.intersect(freeForPark, parkRect);
 ```
 
 **Parking element output shape:**
@@ -455,13 +673,6 @@ actualStalls  = floor(actualSqFt / 325);
 
 ### Phase C — realizeDriveway (connects: 'parcelFrontage', to: elementId, entryU: 'left'|'center'|'right')
 
-**General bounds helper** `elementLocalBounds(el, frame, centroid)`:
-- If `el.localBounds` exists (parking) → return it directly (exact)
-- Else if `el.type === 'building'` → `buildingLocalBounds(el, frame)`
-- Else if `el.feature` exists → approximate from turf bbox corners converted to local
-
-**Target resolution:** looks up `place.to` in `realized`. Fails if target is infeasible.
-
 **u-center of driveway** (within target's u-extent):
 ```javascript
 case 'left':   uCenter = targetBounds.uMin + halfWidth
@@ -472,7 +683,7 @@ default:       uCenter = (targetBounds.uMin + targetBounds.uMax) / 2
 **v range:**
 ```javascript
 vFront  = frontageV(parcelFt, frame)   // parcel road edge
-vTarget = targetBounds.vMin            // parking's near edge (closest to road)
+vTarget = Math.max(targetBounds.vMin, vFront + 1)  // clamp to avoid going outside parcel
 // Rectangle: [uCenter ± halfWidth] × [vFront - 50, vTarget]
 // 50 ft over-extension ensures clip to parcel reaches the road boundary exactly.
 ```
@@ -481,29 +692,7 @@ vTarget = targetBounds.vMin            // parking's near edge (closest to road)
 road and parking, which has already been eroded from `free`. Clipping to the full
 parcel polygon keeps the driveway inside the lot while covering the setback strip.
 
-**Driveway element output shape:**
-```javascript
-{
-  id: 'd1', type: 'driveway', feasible: true,
-  feature: clipped,  // Turf Feature<Polygon>, no properties needed
-}
-```
-
-**Free space update:** subtract `clipped + 3 ft buffer` so buildings don't land in the lane.
-
----
-
-### realizeElement dispatch (Phase D)
-```javascript
-function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
-  if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
-  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
-  if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
-  if (el.type === 'group')    return realizeGroup(el, free, parcelFt, frame, centroid, profile);
-  return { id: el.id, type: el.type, feasible: false,
-           reason: `${el.type} not implemented` };
-}
-```
+**Free space update:** subtract `clipped + 3 ft buffer`.
 
 ---
 
@@ -520,367 +709,80 @@ function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile
   ] }
 ```
 
-**Child size derivation (per child):**
-```javascript
-areaSqFt   = c.size.areaSqFt ?? (profile.defaultBuildingAreaSqFt ?? 12000)
-maxDepthFt = c.size.maxDepthFt ?? (profile.maxBuildingDepthFt ?? 70)
-depthFt    = min(maxDepthFt, sqrt(areaSqFt))   // depth along n̂
-faceFt     = areaSqFt / depthFt                 // face along t̂
-```
+**`scanGroupPlacement` (NOT `placeBuilding`):**
+`placeBuilding` uses `reach = hypot(length, width)/2` isotropic erosion — for a 300×80
+group this is 155 ft, requiring 310 ft parcel depth just for the legal zone.
+`scanGroupPlacement` checks DIRECT POLYGON CONTAINMENT: builds exact bounding-box polygon
+at each candidate position and calls `turf.intersect` to verify fit. For an 80 ft deep
+group, only 40 ft of clearance from the N/S boundary is needed.
 
-**Group bounding box:**
-```javascript
-N            = children.length
-totalFaceFt  = sum(child.faceFt) + gapFt * (N - 1)   // total width along t̂
-groupDepthFt = max(child.depthFt for all children)      // depth = deepest child
+Scans forward in 10 ft steps from `startV`, trying 5 lateral shifts at each depth.
 
-// Orient so that the group's face (totalFaceFt) aligns with t̂
-tIsX         = |frame.t.x| > 0.5                         // true for S/N frontage
-faceIsLonger = totalFaceFt >= groupDepthFt
-groupOrientDeg = tIsX ? (faceIsLonger ? 0 : 90) : (faceIsLonger ? 90 : 0)
-
-bSpec = {
-  label:     el.id,
-  length_ft: max(totalFaceFt, groupDepthFt),
-  width_ft:  min(totalFaceFt, groupDepthFt),
-}
-```
-
-**Group placement — `scanGroupPlacement` (NOT `placeBuilding`):**
-
-`placeBuilding` uses `reach = hypot(length, width)/2` for isotropic erosion. For a
-300×80 group this gives reach ≈ 155 ft — which eats 310 ft of parcel depth (both sides),
-leaving no legal zone on typical shallow parcels.
-
-`scanGroupPlacement` instead uses DIRECT POLYGON CONTAINMENT: it builds the exact
-bounding box polygon at each candidate position and calls `turf.intersect` to verify fit.
-For an 80 ft deep group, only 40 ft of clearance from the N/S boundary is needed.
-
-```javascript
-function scanGroupPlacement(free, parcelFt, frame, centroid,
-                            totalFaceFt, groupDepthFt, startU, startV) {
-  const halfFace  = totalFaceFt  / 2;
-  const halfDepth = groupDepthFt / 2;
-
-  const makeBox = (u, v) => {
-    // Build a lat/lng polygon for the W×D rectangle centred at local (u,v)
-    const ring = [
-      [u-halfFace, v-halfDepth], [u+halfFace, v-halfDepth],
-      [u+halfFace, v+halfDepth], [u-halfFace, v+halfDepth],
-      [u-halfFace, v-halfDepth],
-    ].map(([uu, vv]) => {
-      const ft = localToFeet(uu, vv, frame);
-      const ll = feetToLatLngFromCentroid(ft, centroid);
-      return [ll.lng, ll.lat];
-    });
-    return turf.polygon([ring]);
-  };
-
-  const boxArea = turf.area(makeBox(startU, startV));   // constant across positions
-  const fits = (u, v) => {
-    const isect = turf.intersect(free, makeBox(u, v));
-    return isect != null && turf.area(isect) >= boxArea * 0.999;
-  };
-
-  // Scan forward (deeper into lot) in 10 ft steps from startV.
-  // At each depth, try 5 lateral shifts to handle slanted parcel edges.
-  const vs      = parcelFt.map(p => feetToLocal(p, frame).v);
-  const vMax    = Math.max(...vs);
-  const uShifts = [0, halfFace*0.25, -halfFace*0.25, halfFace*0.5, -halfFace*0.5];
-
-  for (let vi = 0; vi < 80; vi++) {
-    const testV = startV + vi * 10;
-    if (testV + halfDepth > vMax) break;
-    for (const uOff of uShifts) {
-      if (fits(startU + uOff, testV)) {
-        const ft = localToFeet(startU + uOff, testV, frame);
-        return { center_x_ft: ft.x, center_y_ft: ft.y };
-      }
-    }
-  }
-  return null;
-}
-```
-
-**Target position:**
-```javascript
-vFront  = frontageV(parcelFt, frame)
-targetV = vFront + setbackFt + groupDepthFt / 2
-// setbackFt comes from el.place.setbackFt (= bSetbackFt, which includes parking depth)
-
-const groupCenter = scanGroupPlacement(free, parcelFt, frame, centroid,
-                                       totalFaceFt, groupDepthFt, 0, targetV);
-if (!groupCenter) return failAll('Group bounding box does not fit at parcelFrontage');
-const placed = { ...bSpec, ...groupCenter };
-// placed has: label, length_ft, width_ft, center_x_ft, center_y_ft
-```
-
-**If `scanGroupPlacement` returns null** → `failAll(reason)` marks the group infeasible
-AND marks all children infeasible with reason `"Parent group infeasible: ..."`.
-
-**Child distribution along t̂ (front-face aligned):**
-All children's FRONT FACES are aligned to the group's front face (v = groupFrontV).
+**Child distribution:** all children's FRONT FACES align to the group's front face.
 Shorter children leave open space at their rear, not at the front.
 
-```javascript
-const placedLocal = feetToLocal({ x: placed.center_x_ft, y: placed.center_y_ft }, frame);
-const groupFrontV = placedLocal.v - groupDepthFt / 2;  // front face v-coord
-let   uCursor     = placedLocal.u - totalFaceFt / 2;   // start at left edge
+**Free space update:** group BOUNDING BOX (not individual children) subtracted with
+clearanceFt buffer. Prevents double-buffering with child clearance buffers.
 
-const childResults = childSpecs.map(cSpec => {
-  const childU = uCursor + cSpec.faceFt / 2;
-  uCursor     += cSpec.faceFt + gapFt;
-  const childV = groupFrontV + cSpec.depthFt / 2;     // front-aligned, not depth-centered
-  const childFt = localToFeet(childU, childV, frame);
+**Children in `results`:** each child pushed into top-level `results` with `type: 'building'`
+AND registered in `realized` under their own id (e.g. `realized['A']`). This lets
+downstream parking anchor directly to `"A"` and find it after the group is realized.
 
-  const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
-  const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+---
 
-  return {
-    id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
-    length_ft:       Math.max(cSpec.faceFt, cSpec.depthFt),
-    width_ft:        Math.min(cSpec.faceFt, cSpec.depthFt),
-    center_x_ft:     childFt.x,
-    center_y_ft:     childFt.y,
-    orientation_deg: childOrientDeg,
-  };
-});
+### Phase E — realizeBasin (anchor: 'parcelCorner')
+
+**Schema element:**
+```json
+{ "id": "bn1", "type": "basin",
+  "size": { "pctOfParcel": 0.08 },
+  "place": { "anchor": "parcelCorner", "corner": "rearLeft" } }
 ```
 
-**Group result:**
+**Corner name resolution:**
+Semantic names (relative to frontage) are converted to cardinal directions:
+```javascript
+const SEMANTIC_TO_CARDINAL = {
+  rearLeft:   { S:'NW', N:'SE', E:'SW', W:'NE' },
+  rearRight:  { S:'NE', N:'SW', E:'NW', W:'SE' },
+  frontLeft:  { S:'SW', N:'NE', E:'SE', W:'NW' },
+  frontRight: { S:'SE', N:'SW', E:'NE', W:'SW' },
+};
+// Cardinals (NW, NE, SW, SE) pass through directly.
+```
+
+**Placement:**
+Computes target basin area from `pctOfParcel * parcelAreaSqFt`. Finds the parcel corner
+vertex nearest the target cardinal corner, then clips a rectangular block from that corner
+using binary-search to hit the target area within tolerance.
+
+**`pondPct=0` bug (fixed in Phase E):**
+When `pondPct = 0`, `buildTestSchema` correctly omits the basin element from the schema.
+However, `layoutFromArrangement` used `elements.find(e => e.type === 'basin')?.feature ?? null`
+— this was correct but an earlier version called `.feature` unconditionally which would
+throw `TypeError: Cannot read properties of undefined (reading 'feature')` when no basin
+element existed. Fixed by ensuring the `?.feature` optional chain is used correctly.
+The optimizer's `layoutFromElements` in optimize.js handles this the same way. ✓
+
+**Basin element output shape:**
 ```javascript
 {
-  id: el.id, type: 'group', feasible: true,
-  placed,            // { label, length_ft, width_ft, center_x_ft, center_y_ft }
-  orientation_deg: groupOrientDeg,
-  childResults,      // array of child building results
-}
-```
-
-**Free space update in `realizeArrangement`:**
-The GROUP BOUNDING BOX (not individual children) is subtracted from free, with a
-clearanceFt buffer. This prevents double-buffering.
-```javascript
-} else if (result.feasible && result.type === 'group') {
-  const p    = result.placed;
-  const foot = rectPoly(p.center_x_ft, p.center_y_ft, p.length_ft, p.width_ft,
-                        result.orientation_deg, centroid);
-  const buf  = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
-  if (buf) free = turf.difference(free, buf) ?? free;
-}
-```
-
-**Child results registered into `realized` and `results`:**
-After the group result is pushed, each child is registered under its own ID so
-downstream elements (parking, driveways) can anchor to child IDs directly:
-```javascript
-if (result.childResults) {
-  for (const child of result.childResults) {
-    realized[child.id] = child;   // e.g. realized['A'], realized['B']
-    results.push(child);           // also appears as top-level element
-  }
+  id: 'bn1', type: 'basin', feasible: true,
+  feature: turfPolygon,  // the clipped basin polygon
 }
 ```
 
 ---
 
-### Phase D — topoSort update (`childToGroup`)
-
-Parking and driveways can anchor to group CHILDREN (e.g., `anchor: "A"` where "A" is
-inside group "g1"). The topo-sort must resolve such deps to the parent GROUP (which must
-be realized first), not to the child (which doesn't exist yet in `realized`).
-
-**`childToGroup` map** built in `realizeArrangement`:
+### realizeElement dispatch
 ```javascript
-const childToGroup = {};
-for (const el of schema.elements) {
-  if (el.type === 'group' && el.children) {
-    for (const child of el.children) childToGroup[child.id] = el.id;
-  }
-}
-```
-
-**`topoSort` updated signature:**
-```javascript
-function topoSort(elements, childToGroup = {}) {
-  const resolveDep = id => childToGroup[id] ?? id;
-  const deps = Object.fromEntries(elements.map(e => [
-    e.id,
-    getDeps(e).map(resolveDep).filter(d => d !== e.id),
-  ]));
-  // ... DFS topo-sort unchanged
-}
-```
-
-This makes `anchor: "A"` behave as a dependency on `"g1"`, so `g1` is always realized
-before parking tries to look up `realized['A']`. After `g1` is realized, `realized['A']`
-is registered and parking finds it correctly.
-
----
-
-### Phase D — Bug fixes
-
-**Bug 1: Parking clearance blocking parking zone**
-
-`realizeParking` anchors to a building. The building's clearance buffer had already been
-subtracted from `free` during building placement. This meant the 30 ft zone immediately
-in front of the building (the clearance strip) was cut from `free`, so parking clips
-produced a hole there.
-
-Fix: restore the anchor building's own clearance zone back into `free` before clipping
-parking, so parking is allowed to occupy that zone (it can share space with the clearance
-since it's directly adjacent to the building face):
-
-```javascript
-// In realizeParking:
-const anchorFoot = rectPoly(anchorEl.center_x_ft, anchorEl.center_y_ft,
-                            anchorEl.length_ft, anchorEl.width_ft,
-                            anchorEl.orientation_deg ?? 0, centroid);
-const anchorBuf  = turf.buffer(anchorFoot, clearanceFt, { units: 'feet' });
-const clearRing  = anchorBuf ? (turf.difference(anchorBuf, anchorFoot) ?? anchorBuf) : null;
-const freeForPark = clearRing ? (turf.union(free, clearRing) ?? free) : free;
-const clipped = turf.intersect(freeForPark, parkRect);
-```
-
-**Bug 2: Driveway falling outside parcel (vTarget below frontage)**
-
-Before the bSetbackFt fix, parking could be placed with its south edge below the parcel
-boundary (since vFront is the parcel edge, not free0's south edge). The driveway's
-`vTarget = targetBounds.vMin` (parking south edge) would then be below vFront, making
-the driveway rectangle entirely outside the parcel.
-
-Fix: clamp vTarget to always be at or above parcel frontage:
-```javascript
-// In realizeDriveway:
-const vFront  = frontageV(parcelFt, frame);
-const vTarget = Math.max(targetBounds.vMin, vFront + 1);
-```
-
-**Bug 3: Building set back too close — no room for parking**
-
-`placeBuilding` placed the building as close to the road as possible (setback = 20 ft).
-With the building only 20 ft in, the parking zone in front was only ~20 ft deep — far
-too shallow for the required stalls.
-
-Fix in `buildTestSchema`: pre-compute how deep the parking block will be and push the
-building back by exactly that amount so the parking fits perfectly between road and
-building front face:
-
-```javascript
-// In buildTestSchema:
-const firstB        = reqs.buildings[0];
-const firstArea     = firstB.length_ft * firstB.width_ft;
-const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
-const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
-const firstFace     = firstArea / firstDepth;
-const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
-const parkRows      = reqs.parking_stalls > 0
-                      ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
-const parkDepthFt   = parkRows * 30;   // 18 ft stall + 12 ft aisle/2 = 30 ft per row
-const bSetbackFt    = setbackFt + parkDepthFt;
-// bSetbackFt is passed as place.setbackFt for both individual buildings and groups.
-```
-
-**Example:** 50 stalls on a 150 ft wide first building:
-- stallsPerRow = floor(150/9) = 16
-- parkRows = ceil(50/16) = 4
-- parkDepthFt = 4 × 30 = 120 ft
-- bSetbackFt = 20 + 120 = 140 ft
-- Building front face lands at vFront + 140, giving exactly 120 ft of parking zone.
-
----
-
-### Phase D — Updated `buildTestSchema`
-
-Single building → individual `building` element.
-Multiple buildings → `group` / `strip` element containing all buildings as children.
-Parking always anchors to the FIRST BUILDING (by label, e.g. `"A"`).
-
-```javascript
-function buildTestSchema(reqs, frontage, setbackFt) {
-  // Pre-compute parking depth to push building back enough for parking to fit.
-  const firstB        = reqs.buildings[0];
-  const firstArea     = firstB.length_ft * firstB.width_ft;
-  const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
-  const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
-  const firstFace     = firstArea / firstDepth;
-  const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
-  const parkRows      = reqs.parking_stalls > 0
-                        ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
-  const parkDepthFt   = parkRows * 30;
-  const bSetbackFt    = setbackFt + parkDepthFt;
-
-  let firstBuildingId;
-  const elements = [];
-
-  if (reqs.buildings.length === 1) {
-    const b  = reqs.buildings[0];
-    const id = b.label || 'b1';
-    firstBuildingId = id;
-    elements.push({
-      id, type: 'building',
-      size:  { areaSqFt: b.length_ft * b.width_ft,
-               maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-      place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU: 'center' },
-    });
-  } else {
-    // Multiple buildings → group strip; parking anchors to the first child.
-    firstBuildingId = reqs.buildings[0].label || 'b0';
-    elements.push({
-      id: 'g1', type: 'group', layout: 'strip', gapFt: 0,
-      place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt },
-      children: reqs.buildings.map((b, i) => ({
-        id:   b.label || `b${i}`,
-        size: { areaSqFt: b.length_ft * b.width_ft,
-                maxDepthFt: Math.min(b.length_ft, b.width_ft) },
-      })),
-    });
-  }
-
-  if (reqs.parking_stalls > 0) {
-    elements.push({ id: 'p1', type: 'parking',
-      size: { stalls: reqs.parking_stalls },
-      place: { anchor: firstBuildingId, face: 'front' } });
-
-    if (reqs.driveways > 0) {
-      const count   = Math.min(reqs.driveways, 3);
-      const entryUs = count === 1 ? ['center']
-                    : count === 2 ? ['left', 'right']
-                    :               ['left', 'center', 'right'];
-      entryUs.forEach((entryU, i) => {
-        elements.push({ id: `d${i+1}`, type: 'driveway',
-          size: { widthFt: 24 },
-          place: { connects: 'parcelFrontage', to: 'p1', entryU } });
-      });
-    }
-  }
-
-  return { frontage, elements };
-}
-```
-
----
-
-### Phase D — `onSolve` error handling
-
-Added try/catch around the entire arranger path so any JavaScript exception is shown
-in the status bar instead of leaving "Solving…" with a silent blank screen.
-After successful solve, status shows building count and any infeasibility warnings:
-
-```javascript
-if (USE_ARRANGER) {
-  try {
-    // ... build schema, realizeArrangement, layoutFromArrangement, renderLayout ...
-    const bCount  = layout.buildings.length;
-    const bTotal  = reqs.buildings.length;
-    const warnTxt = layout.warnings.length ? ' | ' + layout.warnings.join('; ') : '';
-    document.getElementById('status').textContent =
-      `${bCount} / ${bTotal} buildings placed${warnTxt}`;
-  } catch (err) {
-    console.error('[arrange] onSolve error:', err);
-    document.getElementById('status').textContent = 'Error: ' + err.message;
-  }
-  return;
+function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
+  if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
+  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
+  if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
+  if (el.type === 'group')    return realizeGroup(el, free, parcelFt, frame, centroid, profile);
+  if (el.type === 'basin')    return realizeBasin(el, free, parcelFt, frame, centroid, profile);
+  return { id: el.id, type: el.type, feasible: false, reason: `${el.type} not implemented` };
 }
 ```
 
@@ -897,14 +799,14 @@ function layoutFromArrangement(elements) {
                    orientation_deg: e.orientation_deg ?? 0 })),
     parking_areas: elements
       .filter(e => e.type === 'parking' && e.feasible)
-      .map(e => e.feature),           // already has .properties attached
+      .map(e => e.feature),
     driveways: elements
       .filter(e => e.type === 'driveway' && e.feasible)
       .map(e => e.feature),
-    detention_pond: null,
+    detention_pond: elements.find(e => e.type === 'basin' && e.feasible)?.feature ?? null,
     warnings: elements.filter(e => !e.feasible)
                       .map(e => `[arrange] ${e.id}: ${e.reason ?? 'infeasible'}`),
-    rationale: 'realizeArrangement (Phase D)',
+    rationale: 'realizeArrangement (Phase E)',
   };
 }
 ```
@@ -914,17 +816,29 @@ results are pushed into the top-level `results` array with `type: 'building'`, s
 are picked up correctly. The parent group element (`type: 'group'`) is NOT included in
 the buildings list — only the children are.
 
-### USE_ARRANGER flag
-`const USE_ARRANGER = true;` at top of main.js — **currently live**.
-When `true`, `onSolve` builds the test schema and routes through `realizeArrangement`.
-The optimizer (`onOptimize`) always uses `solveLayout` directly, unaffected by this flag.
+---
+
+### `buildTestSchema` in main.js (used by onSolve)
+
+Builds the schema for the Solve button. Single building → individual element.
+Multiple buildings → group/strip containing all as children.
+
+Key formula — bSetbackFt pushes building back to make room for front parking:
+```javascript
+const stallsPerRow = Math.max(1, Math.floor(firstFace / 9));
+const parkRows     = reqs.parking_stalls > 0 ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
+const parkDepthFt  = parkRows * 30;   // 18 ft stall + 12 ft aisle/2 = 30 ft per row
+const bSetbackFt   = setbackFt + parkDepthFt;
+```
+
+Basin included only when `reqs.pondPct > 0` (using the UI basin-corner dropdown value).
+Driveways: 1 → center, 2 → left+right, 3 → left+center+right.
 
 ---
 
 ## solver.js — placeBuilding export (used by arrange.js)
 
 ```javascript
-// Exported from solver.js — used by both solveLayout and arrange.js
 export function placeBuilding(free, bSpec, targetPt, orientations, centroid) {
   for (const deg of orientations) {
     const r = reach(bSpec.length_ft, bSpec.width_ft);
@@ -952,63 +866,7 @@ export function placeBuilding(free, bSpec, targetPt, orientations, centroid) {
 **Basin default corner** (Step 3): when `hints.basinCorner` is undefined, the solver
 derives the default from frontage: `S→NE, N→SW, W→SE, E→NW` (opposite the road).
 **IMPORTANT**: the UI basin-corner `<select>` always sends an explicit value (SW/SE/NW/NE),
-so this default only fires when `basinCorner` is absent from hints — i.e. AI-only flows
-or programmatic calls where basinCorner is omitted.
-
----
-
-## Parking placement algorithm (`placeAlongFrontageEdge`) — solver.js
-
-All four directions place a 60 ft deep parking block against the frontage edge of
-`biggestPoly(free)`. The challenge is placing an **axis-aligned rectangle** against
-a boundary that may be **slanted** — the rectangle will be clipped, losing stalls.
-
-### S and N frontage (two-phase scan + anchor)
-
-**Phase 1 — find where the frontage actually is (30-step scan):**
-Scan in 30 steps across the south 50% of the free space's lat range. At each step,
-intersect a thin band with `biggest`, measure cross-section width. Stop at the
-**first (southernmost) lat where width ≥ needed parking width**.
-Fall back to widest lat seen if no single lat is wide enough.
-
-**Phase 2 — pin to slanted boundary (`sampleEdgeLat`):**
-Samples the south boundary at 7 longitudes across the parking width, returns the
-**northernmost south boundary lat** — so the parking rectangle's south edge sits at
-or above the actual boundary everywhere. No clipping.
-
-```javascript
-function sampleEdgeLat(poly, side, centerLng, halfWidthDeg, minLat, maxLat, s) {
-  const SAMPLES = 7;
-  const bandHalf = 10 / s.lngToFt;
-  let result = side === 'S' ? -Infinity : Infinity;
-  for (let i = 0; i < SAMPLES; i++) {
-    const lng = centerLng - halfWidthDeg + (i / (SAMPLES-1)) * 2 * halfWidthDeg;
-    const band = turf.bboxPolygon([lng - bandHalf, minLat - 1, lng + bandHalf, maxLat + 1]);
-    const slice = turf.intersect(poly, band);
-    if (!slice) continue;
-    const bb = turf.bbox(biggestPoly(slice));
-    if (side === 'S') result = Math.max(result, bb[1]);  // northernmost south edge
-    else              result = Math.min(result, bb[3]);  // southernmost north edge
-  }
-  return isFinite(result) ? result : null;
-}
-```
-
-### E and W frontage
-60 ft depth in lng; centered at `(minLat + maxLat) / 2`. `sampleEdgeLng` samples
-E/W boundary at 7 latitudes, returns most-constrained point. Rectangle anchored there.
-
----
-
-## Driveways (`makeDriveways`) — solver.js
-
-24 ft wide strips from parcel boundary to parking edge.
-
-**S/N**: horizontal bbox strip between parcel south/north and parking south/north edge,
-intersected with parcel polygon, distributed evenly across parking width.
-
-**E/W**: lat strip intersected with parcel AND parking. Parking cross-section `pkBbox[2/0]`
-used as inner boundary (not bbox), so driveways correctly follow slanted parcel boundaries.
+so this default only fires when `basinCorner` is absent from hints.
 
 ---
 
@@ -1052,6 +910,12 @@ await renderLayoutOnCanvas(canvas, parcelLatLng, layout, centroid)
 Takes `parcelLatLng` (not `parcelFt`). Web Mercator projection + Static Maps satellite
 background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.src`.
 
+**Satellite background note:** The canvas uses Google Static Maps API, which is a
+SEPARATE API from the Maps JavaScript API used for the interactive map. Static Maps
+must be independently enabled in Google Cloud Console + billing required.
+The code already falls back gracefully to a dark `#1a1a2e` background when the image
+fails to load — this is expected behavior if Static Maps isn't enabled.
+
 ---
 
 ## Key technical invariants
@@ -1069,6 +933,47 @@ background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.
   edge and parking, which has already been eroded from `free`. Must clip to full parcel.
 - **parking.localBounds stores pre-clip extents**: so `realizeDriveway` can position against
   the full intended parking rectangle without bbox-in-lat/lng approximation error.
+- **Groups use scanGroupPlacement, not placeBuilding**: placeBuilding's isotropic erosion
+  (reach ≈ 155 ft for a 300×80 group) eats too much parcel depth. scanGroupPlacement
+  checks direct polygon containment — only 40 ft clearance needed for an 80 ft deep group.
+- **bSetbackFt must include parking depth**: without this, the building sits at setback=20 ft
+  and parking clips to ~20 ft — almost no stalls. Formula: `setbackFt + parkRows × 30`.
+- **Parking clearance must be restored before clipping**: `free` has the building's 30 ft
+  clearance subtracted. Without `turf.union(free, clearRing)` in `realizeParking`, the
+  zone directly in front of the building is a hole in the parking.
+- **Turf is a CDN global (v6.5.0) on the main thread**: do NOT use ESM imports in main.js / arrange.js / etc. Access as `turf.*`. Exception: `optimizer-worker.js` imports Turf from `https://esm.sh/@turf/turf@6.5.0` as ESM (module workers can't use importScripts), spread into a mutable plain object via `globalThis.turf = { ...turfNS }` so the monkey-patch can assign to it.
+- **`realizeArrangement` never throws**: all failures return `{ feasible: false, reason }`.
+  The try/catch in `onSolve` is a safety net for unexpected JS errors only.
+- **optimizeArrangement's turf monkey-patch**: JSTS throws on exactly coincident geometry
+  boundaries in multi-building groups. Monkey-patch turf.union/difference/intersect to
+  return null instead of throwing, inside a try/finally that always restores originals.
+
+---
+
+## Schema optimizer bugs fixed (Phase 1)
+
+### Bug 1: "Optimizer error: Unable to complete output ring" (single building)
+When testing with 1 building, `optimizeArrangement` threw a Turf/JSTS geometry exception.
+The outer try/catch in `onOptimize` caught it and showed "Optimizer error: ..." — killing
+the whole run.
+**Fix:** Added per-candidate try/catch inside the generator loop in `optimizeArrangement`.
+One bad geometry silently skips that candidate; the search continues normally.
+Commit: b520168 (initial impl) → per-candidate catch is in the main loop body.
+
+### Bug 2: "No feasible layouts found (288 candidates tried)" with 5 buildings
+With 5 buildings, ALL 288 candidates were either thrown or skipped. The per-candidate
+try/catch from Bug 1 caught every throw, so zero candidates survived to the feasibility gate.
+
+**Root cause:** Multi-building group's bounding-box clearance buffer and building A's
+clearance buffer (used in `realizeParking`'s `turf.union(free, clearRing)`) share EXACTLY
+coincident boundary segments. JSTS throws "Unable to complete output ring" on these.
+
+**Fix:** Monkey-patch `turf.union`, `turf.difference`, `turf.intersect` at the start of
+`optimizeArrangement` to return `null` instead of throwing. Arrange.js already has
+`?? free` / `?? null` fallbacks for all these calls — they just never reached them because
+the throw propagated first. With the monkey-patch, the fallbacks activate, parking clips
+to a slightly smaller zone (no clearance restore), and candidates remain feasible+scoreable.
+Commit: 6767a1f
 
 ---
 
@@ -1080,33 +985,34 @@ background + scale bar. `img.crossOrigin = 'anonymous'` must be set before `img.
 | B | parking → building face, stall-count sizing, clip-to-free | ✅ Done |
 | C | driveway connects frontage → parking, entryU left/center/right | ✅ Done |
 | D | group/strip: children along t̂, gapFt, child faces as anchors, scanGroupPlacement | ✅ Done |
-| E | basin → parcelCorner, semantic + cardinal corners, full schema round-trip | ✅ Done |
+| E | basin → parcelCorner, semantic + cardinal corners, pondPct=0 fix | ✅ Done |
 
----
+## Phase roadmap (schema optimizer)
 
-## What's next: arrange.js Phase E
-
-**Phase E: basin + full feasibility + multi-element schemas**
-
-From the spec:
-- `basin` element type: `{ type: 'basin', size: { pctOfParcel: 0.08 }, place: { anchor: 'parcelCorner', corner: 'rearLeft' } }`
-- Wire `feasible: false` cases for all element types (oversized building → graceful failure, rest still render)
-- Test: full schema with building + group + parking + driveway + basin all in one schema
-- Test: force an oversized building → confirm `feasible: false` with valid output for feasible elements
-- Candidate: wrap parking (front + side), 2 driveways, gapFt > 0 for spacing between group children
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Exhaustive discrete cross-product search, synchronous, feasibility gate, ranked output | ✅ Done |
+| 2 | Local refinement: fine setbackFt grid (±9 ft in 2 ft steps) + numeric alignU offsets (±30/60 ft) around top-K winners | ✅ Done |
+| 3 | Web Worker + progressive UI: move search off main thread, stream best-so-far, step-through ranked list (displayK=10 rows) | ✅ Done |
 
 ---
 
 ## API keys
-- `window.MAPS_API_KEY` — Google Maps + Static Maps (config.js, gitignored)
-- `window.GEMINI_API_KEY` — Gemini 2.5 Flash (config.js, gitignored)
+- `window.MAPS_API_KEY` — Google Maps JavaScript API + Static Maps API (config.js, gitignored)
+  - Maps JavaScript API: required for interactive satellite map + polygon drawing
+  - Static Maps API: required for canvas satellite background in "View Scale Drawing" — SEPARATE enablement
+- `window.GEMINI_API_KEY` — Gemini 2.5 Flash for AI hints (config.js, gitignored)
 
 ## How to run locally
 Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.0.1:5500`
 
 ## Git log (recent)
 ```
-49a2606 blah  (← Phase D work; commit message is placeholder)
+6767a1f Fix optimizer crash on Turf geometry errors in individual candidates
+b520168 Add schema optimizer Phase 1: arrangement search via realizeArrangement
+b084610 Add arrange.js Phase E: basin placement + fix pondPct=0 bug
+c4bafb8 Add arrange.js Phase D: group/strip placement engine
+49a2606 blah  (← Phase D earlier work)
 fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
 8387ab0 Update SUMMARY.md with full session detail (scoring, optimizer, Phase A arrange)
 85b1a5e Add scoring, optimizer, and Phase A relational placement engine
@@ -1118,35 +1024,3 @@ fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
 96d9b13 Wire aiHints.frontage through to solver in onSolve
 165e183 Add road frontage parameter (steps 1-3 + AI parsing)
 ```
-
-## Phase D — Known invariants and gotchas for future sessions
-
-- **`scanGroupPlacement` vs `placeBuilding`**: Groups MUST use `scanGroupPlacement`.
-  `placeBuilding` uses `reach = hypot(W,D)/2` isotropic erosion — for a 300×80 group
-  this is 155 ft, requiring 310 ft of parcel depth just for the legal zone. Typical
-  400-500 ft deep parcels barely fit or don't fit at all. `scanGroupPlacement` checks
-  direct polygon containment: only 40 ft N/S clearance needed for an 80 ft deep group.
-
-- **`bSetbackFt` must include parking depth**: Without this, the building is placed at
-  setback=20 ft and parking clips to only 20 ft, yielding almost no stalls. The formula
-  `bSetbackFt = setbackFt + parkRows × 30` pushes the building back so parking fits cleanly.
-
-- **Parking clearance must be restored before clipping**: `free` has the building's 30 ft
-  clearance already subtracted. Without the `turf.union(free, clearRing)` step in
-  `realizeParking`, the parking zone directly in front of the building is a hole.
-
-- **Children in `results` array have `type: 'building'`**: `layoutFromArrangement` filters
-  on `type === 'building'`. This works because each child pushed into `results` has
-  `type: 'building'`. The group element itself has `type: 'group'` and is NOT shown.
-
-- **`childToGroup` must be built before `topoSort`**: Anchoring parking to `"A"` (a group
-  child) must resolve to `"g1"` (the parent group) for topo-sort to order g1 before p1.
-  Without this, parking would be processed before the group, and `realized['A']` would
-  be undefined.
-
-- **`turf.union` availability**: The codebase imports turf as a global CDN bundle (6.5.0).
-  `turf.union` is available. Do NOT try to use ESM imports for turf — it's a global.
-
-- **`realizeArrangement` never throws**: All failures return `{ feasible: false, reason }`.
-  The try/catch in `onSolve` is a safety net for unexpected JS errors (e.g., from turf
-  on malformed geometry), not for expected infeasibility.

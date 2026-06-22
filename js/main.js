@@ -37,6 +37,12 @@ let solveOverlays = [];
 let lastLayout = null;
 let aiHints = {};
 
+// Schema optimizer worker state
+let optimizerWorker = null;
+let lastRanked      = [];
+let lastReqs        = null;
+let lastFrontage    = 'S';
+
 export function init() {
   initMap('map', onBoundaryClosed);
   document.getElementById('btn-use-boundary').addEventListener('click', onUseBoundary);
@@ -51,6 +57,7 @@ export function init() {
   });
   document.getElementById('btn-ai-apply').addEventListener('click', onApplyAI);
   document.getElementById('btn-optimize').addEventListener('click', onOptimize);
+  document.getElementById('btn-cancel-optimize').addEventListener('click', onCancelOptimize);
 }
 
 function addBuildingRow() {
@@ -291,6 +298,9 @@ function getReqs() {
 }
 
 function onSolve() {
+  if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
+  document.getElementById('btn-cancel-optimize').style.display = 'none';
+  document.getElementById('btn-optimize').disabled = false;
   clearSolveOverlays();
   document.getElementById('optimizer-panel').style.display = 'none';
   document.getElementById('status').textContent = 'Solving…';
@@ -461,7 +471,17 @@ function renderLayout(layout, reqs, isDeterministic, frontageHint) {
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
 }
 
+function onCancelOptimize() {
+  if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
+  document.getElementById('btn-cancel-optimize').style.display = 'none';
+  document.getElementById('btn-optimize').disabled = false;
+  document.getElementById('status').textContent = 'Optimization cancelled.';
+}
+
 function onOptimize() {
+  // Kill any in-progress worker before starting a new run.
+  if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
+
   clearSolveOverlays();
   document.getElementById('optimizer-panel').style.display = 'none';
   document.getElementById('status').textContent = 'Optimizing…';
@@ -471,26 +491,62 @@ function onOptimize() {
   const reqs = getReqs();
 
   if (USE_SCHEMA_OPTIMIZER) {
-    try {
-      const { ranked, totalTried } = optimizeArrangement(parcelLatLng, reqs, frontage, PROFILES.retail);
-      if (ranked.length === 0) {
+    lastReqs     = reqs;
+    lastFrontage = frontage;
+
+    document.getElementById('btn-optimize').disabled = true;
+    document.getElementById('btn-cancel-optimize').style.display = '';
+
+    optimizerWorker = new Worker('./js/optimizer-worker.js', { type: 'module' });
+
+    optimizerWorker.onmessage = (e) => {
+      const { type } = e.data;
+
+      if (type === 'progress') {
+        // New best found — render it live and update status.
+        const { best, totalTried } = e.data;
+        clearSolveOverlays();
+        lastLayout = best.layout;
+        renderLayout(best.layout, reqs, true, frontage);
+        document.getElementById('btn-render').disabled = false;
         document.getElementById('status').textContent =
-          `No feasible layouts found (${totalTried} candidates tried).`;
-        return;
+          `Optimizing… ${totalTried} tried · best so far: ${best.total.toFixed(2)}`;
+
+      } else if (type === 'done') {
+        const { ranked, totalTried } = e.data;
+        optimizerWorker = null;
+        document.getElementById('btn-cancel-optimize').style.display = 'none';
+        document.getElementById('btn-optimize').disabled = false;
+
+        if (ranked.length === 0) {
+          document.getElementById('status').textContent =
+            `No feasible layouts found (${totalTried} candidates tried).`;
+          return;
+        }
+
+        lastRanked = ranked;
+        const best = ranked[0];
+        clearSolveOverlays();
+        lastLayout = best.layout;
+        renderLayout(best.layout, reqs, true, frontage);
+        showSchemaOptimizerResult(ranked);
+        document.getElementById('btn-render').disabled = false;
+        const k = best.schema._knobs;
+        document.getElementById('status').textContent =
+          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried` +
+          ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}`;
       }
-      const best = ranked[0];
-      lastLayout = best.layout;
-      renderLayout(best.layout, reqs, true, frontage);
-      showSchemaOptimizerResult(ranked, PROFILES.retail.searchConfig.topK ?? 4);
-      document.getElementById('btn-render').disabled = false;
-      const k = best.schema._knobs;
-      document.getElementById('status').textContent =
-        `Schema optimizer: ${ranked.length} feasible / ${totalTried} tried` +
-        ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${k.alignU}`;
-    } catch (err) {
-      console.error('[optimizeArrangement] error:', err);
+    };
+
+    optimizerWorker.onerror = (err) => {
+      console.error('[optimizer-worker]', err);
+      optimizerWorker = null;
+      document.getElementById('btn-cancel-optimize').style.display = 'none';
+      document.getElementById('btn-optimize').disabled = false;
       document.getElementById('status').textContent = 'Optimizer error: ' + err.message;
-    }
+    };
+
+    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail });
     return;
   }
 
@@ -543,13 +599,19 @@ function showOptimizerResult(best, all) {
   document.getElementById('optimizer-panel').style.display = 'flex';
 }
 
-function showSchemaOptimizerResult(ranked, topK) {
-  const topN = ranked.slice(0, topK);
+function fmtAlignU(alignU) {
+  if (typeof alignU !== 'number') return alignU;
+  return `u${alignU >= 0 ? '+' : ''}${Math.round(alignU)}ft`;
+}
+
+function showSchemaOptimizerResult(ranked) {
+  const displayK = PROFILES.retail.searchConfig.displayK ?? 10;
+  const topN = ranked.slice(0, displayK);
   const best = topN[0];
   const k = best.schema._knobs;
   document.getElementById('optimizer-winner-label').innerHTML =
     `<span class="opt-winner-label">` +
-    `Winner: setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${k.alignU}` +
+    `Winner: setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${fmtAlignU(k.alignU)}` +
     `</span>`;
 
   const container = document.getElementById('optimizer-candidates');
@@ -558,16 +620,26 @@ function showSchemaOptimizerResult(ranked, topK) {
   topN.forEach((c, i) => {
     const ck = c.schema._knobs;
     const row = document.createElement('div');
-    row.className = 'opt-candidate' + (i === 0 ? ' opt-candidate-winner' : '');
+    row.className = 'opt-candidate' + (i === 0 ? ' opt-candidate-winner opt-candidate-active' : '');
     const dwLabel = Array.isArray(ck.driveways) ? ck.driveways.join('/') : ck.driveways;
     row.innerHTML =
       `<span class="opt-rank">#${i + 1}</span>` +
       `<span class="opt-params">` +
-        `${ck.basinCorner} · ${ck.setbackFt}ft · ${ck.alignU}` +
+        `${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
         (ck.gapFt > 0 ? ` · gap ${ck.gapFt}ft` : '') +
         ` · dw:${dwLabel}` +
       `</span>` +
       `<span class="opt-score">${c.total.toFixed(2)}</span>`;
+
+    // Step-through: click to render this candidate's layout.
+    row.addEventListener('click', () => {
+      container.querySelectorAll('.opt-candidate').forEach(r => r.classList.remove('opt-candidate-active'));
+      row.classList.add('opt-candidate-active');
+      clearSolveOverlays();
+      lastLayout = c.layout;
+      renderLayout(c.layout, lastReqs, true, lastFrontage);
+    });
+
     container.appendChild(row);
   });
 
@@ -598,7 +670,10 @@ function clearSolveOverlays() {
 }
 
 function onClear() {
+  if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
+  document.getElementById('btn-cancel-optimize').style.display = 'none';
   parcelLatLng = []; parcelFt = []; centroid = null;
+  lastRanked = []; lastReqs = null;
   aiHints = {};
   clearSolveOverlays();
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }

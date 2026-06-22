@@ -33,7 +33,14 @@ export const PROFILES = {
       alignU:        ['left', 'center', 'right'],           // lateral alignment of building/group
       // Search limits
       maxCandidates: 500,   // hard cap on generator output (prevents runaway if config widens)
-      topK:          4,     // candidates shown in the optimizer panel
+      topK:          4,     // Phase 2 refines around this many Phase 1 winners
+      displayK:      10,    // rows shown in the step-through optimizer panel
+      // Phase 2 local-refinement config
+      refineConfig: {
+        setbackStep:    2,                  // ft between fine setback samples
+        setbackRange:   9,                  // ±ft around Phase 1 winner setback value
+        alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+      },
     },
   },
 };

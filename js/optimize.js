@@ -1,6 +1,6 @@
 import { solveLayout } from './solver.js';
 import { score } from './score.js';
-import { realizeArrangement } from './arrange.js';
+import { realizeArrangement, buildLocalFrame } from './arrange.js';
 import { latLngToFeet, polygonAreaSqFt } from './projection.js';
 
 // ---------------------------------------------------------------------------
@@ -189,45 +189,180 @@ function* generateCandidates(reqs, frontage, searchConfig) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Schema optimizer Phase 2 — local refinement around top-K Phase 1 winners
+// ---------------------------------------------------------------------------
+
+// Total face width (along t̂) for the building(s) in reqs — used to estimate
+// 'left'/'right' alignU positions so Phase 2 can seed numeric offsets around them.
+function computeTotalFaceFt(reqs) {
+  return reqs.buildings.reduce((sum, b) => {
+    const area  = b.length_ft * b.width_ft;
+    const depth = Math.min(Math.min(b.length_ft, b.width_ft), Math.sqrt(area));
+    return sum + area / depth;
+  }, 0);
+}
+
+// Convert a Phase 1 string alignU to a numeric u-coordinate in local frame (feet).
+// Mirrors the logic in realizeBuilding/realizeGroup so Phase 2 offsets are centred
+// on the same position the arranger was targeting.
+function alignUToFeet(alignU, parcelFt, frame, faceFt, setbackFt) {
+  if (typeof alignU === 'number') return alignU;
+  const us   = parcelFt.map(p => p.x * frame.t.x + p.y * frame.t.y);
+  const uMin = Math.min(...us), uMax = Math.max(...us);
+  if (alignU === 'left')  return uMin + setbackFt + faceFt / 2;
+  if (alignU === 'right') return uMax - setbackFt - faceFt / 2;
+  return 0; // 'center'
+}
+
+// Phase 2: try a fine setbackFt grid and numeric alignU offsets around each
+// Phase 1 winner.  Returns { candidates, tried } so the caller can account for
+// total attempted candidates across both phases.
+function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt) {
+  const { refineConfig, setbackFt: phase1Setbacks } = profile.searchConfig;
+  if (!refineConfig || topKWinners.length === 0) return { candidates: [], tried: 0 };
+
+  const frame     = buildLocalFrame(frontage);
+  const phase1Set = new Set(phase1Setbacks);
+  const faceFt    = computeTotalFaceFt(reqs);
+
+  const candidates = [];
+  let tried = 0;
+
+  for (const winner of topKWinners) {
+    const k = winner.schema._knobs;
+
+    // Fine setback grid: ±refineRange in refineStep increments, skipping Phase 1 values.
+    const fineSetbacks = [];
+    for (let d = -refineConfig.setbackRange; d <= refineConfig.setbackRange; d += refineConfig.setbackStep) {
+      const v = Math.round(k.setbackFt + d);
+      if (v >= 5 && !phase1Set.has(v)) fineSetbacks.push(v);
+    }
+    const uniqueSetbacks = [...new Set(fineSetbacks)];
+
+    // Numeric alignU positions: Phase 1 base + configured offsets.
+    const baseU  = alignUToFeet(k.alignU, parcelFt, frame, faceFt, k.setbackFt);
+    const alignUs = refineConfig.alignOffsetsFt.map(off => baseU + off);
+
+    for (const setbackFt of uniqueSetbacks) {
+      for (const alignU of alignUs) {
+        tried++;
+        const schema = buildCandidateSchema(reqs, frontage, { ...k, setbackFt, alignU });
+
+        let elements;
+        try {
+          ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+        } catch (_) { continue; }
+
+        if (elements.some(e => !e.feasible)) continue;
+
+        const layout = layoutFromElements(elements);
+        const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+        candidates.push({
+          schema,
+          layout,
+          total:    result.total,
+          maxScore: result.maxScore,
+          terms:    result.terms,
+          feasible: true,
+        });
+      }
+    }
+  }
+
+  return { candidates, tried };
+}
+
 // Main entry point for Phase 1.
 // Returns { ranked, totalTried } where ranked is sorted by total descending
 // and contains only feasible candidates (all elements feasible:true).
 // Frontage is held fixed — it is NEVER a search dimension.
-export function optimizeArrangement(parcelLngLat, reqs, frontage, profile) {
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null) {
   const searchConfig   = profile.searchConfig;
   const parcelFt       = latLngToFeet(parcelLngLat);
   const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
 
   const ranked = [];
   let totalTried = 0;
+  let currentBest = null;
 
-  for (const schema of generateCandidates(reqs, frontage, searchConfig)) {
-    totalTried++;
+  function notifyIfBetter(candidate) {
+    if (!onProgress) return;
+    if (!currentBest || candidate.total > currentBest.total) {
+      currentBest = candidate;
+      onProgress({ best: candidate, totalTried });
+    }
+  }
 
-    let elements;
-    try {
-      ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
-    } catch (_) {
-      // Turf/JSTS throws on degenerate geometry (self-intersecting rings, near-zero
-      // areas). Treat as infeasible and continue — don't abort the whole search.
-      continue;
+  // With multi-building groups the group's clearance buffer and the first child's
+  // clearance buffer share EXACTLY coincident boundary segments (the child defines
+  // the group depth, so both buffers have the same extent). JSTS's ring-traversal
+  // algorithm throws "Unable to complete output ring" when turf.union / turf.difference
+  // encounter these coincident edges. Arrange.js already guards every one of these
+  // calls with a `?? free` or `?? null` fallback — they just never reach it because
+  // the throw propagates first. Patching the turf globals to return null on error
+  // lets the existing fallbacks kick in (parking clips to a slightly smaller zone
+  // without the clearance restore) so candidates remain feasible and scoreable.
+  // The originals are always restored via finally so nothing outside this function
+  // is affected.
+  const origUnion      = turf.union;
+  const origDifference = turf.difference;
+  const origIntersect  = turf.intersect;
+  turf.union      = (a, b) => { try { return origUnion(a, b);      } catch (_) { return null; } };
+  turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
+  turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
+
+  try {
+    // Phase 1: exhaustive discrete cross-product search.
+    for (const schema of generateCandidates(reqs, frontage, searchConfig)) {
+      totalTried++;
+
+      let elements;
+      try {
+        ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+      } catch (_) {
+        // Safety net for any remaining unexpected throws (e.g. from turf.buffer,
+        // which isn't patched above). Treat as infeasible and keep going.
+        continue;
+      }
+
+      // Feasibility gate: disqualify the candidate if any element failed.
+      // All elements in a generated schema are required — partial failure = invalid plan.
+      if (elements.some(e => !e.feasible)) continue;
+
+      const layout = layoutFromElements(elements);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+
+      const candidate = {
+        schema,   // includes _knobs for UI inspection
+        layout,
+        total:    result.total,
+        maxScore: result.maxScore,
+        terms:    result.terms,
+        feasible: true,
+      };
+      ranked.push(candidate);
+      notifyIfBetter(candidate);
     }
 
-    // Feasibility gate: disqualify the candidate if any element failed.
-    // All elements in a generated schema are required — partial failure = invalid plan.
-    if (elements.some(e => !e.feasible)) continue;
-
-    const layout = layoutFromElements(elements);
-    const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
-
-    ranked.push({
-      schema,   // includes _knobs for UI inspection
-      layout,
-      total:    result.total,
-      maxScore: result.maxScore,
-      terms:    result.terms,
-      feasible: true,
-    });
+    // Phase 2: local refinement around top-K Phase 1 winners.
+    // Fine-grid setbackFt and numeric alignU offsets from each winner's base position.
+    if (ranked.length > 0) {
+      ranked.sort((a, b) => b.total - a.total);
+      const topK = searchConfig.topK ?? 4;
+      const { candidates: p2candidates, tried: p2tried } = refineArrangement(
+        ranked.slice(0, topK), parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt
+      );
+      totalTried += p2tried;
+      for (const c of p2candidates) {
+        ranked.push(c);
+        notifyIfBetter(c);
+      }
+    }
+  } finally {
+    turf.union      = origUnion;
+    turf.difference = origDifference;
+    turf.intersect  = origIntersect;
   }
 
   ranked.sort((a, b) => b.total - a.total);

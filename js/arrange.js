@@ -19,7 +19,7 @@ import { toPoly, rectPoly } from './geometry.js';
 // u = lateral offset  (0 at parcel centroid, positive in t̂ direction)
 // ---------------------------------------------------------------------------
 
-function buildLocalFrame(frontage) {
+export function buildLocalFrame(frontage) {
   switch (frontage) {
     case 'S': return { n: { x: 0, y:  1 }, t: { x: 1, y:  0 } };
     case 'N': return { n: { x: 0, y: -1 }, t: { x: 1, y:  0 } };
@@ -414,12 +414,23 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   const vFront  = frontageV(parcelFt, frame);
   const targetV = vFront + setbackFt + groupDepthFt / 2;
 
+  // Lateral start from alignU: numeric = direct u-feet, strings map to parcel extents.
+  const alignU = place.alignU ?? 'center';
+  let startU = 0;
+  if (typeof alignU === 'number') {
+    startU = alignU;
+  } else if (alignU === 'left' || alignU === 'right') {
+    const us   = parcelFt.map(p => feetToLocal(p, frame).u);
+    const uMin = Math.min(...us), uMax = Math.max(...us);
+    startU = alignU === 'left' ? uMin + totalFaceFt / 2 : uMax - totalFaceFt / 2;
+  }
+
   // Use direct bbox containment scan instead of placeBuilding's circumradius erosion.
   // placeBuilding erodes by reach = hypot(totalFaceFt, groupDepthFt)/2, which for a
   // 300×80 group yields ~155 ft — often exceeding the parcel's available depth. Direct
   // scan only needs halfDepth (40 ft) clearance from N/S boundaries.
   const groupCenter = scanGroupPlacement(
-    free, parcelFt, frame, centroid, totalFaceFt, groupDepthFt, 0, targetV,
+    free, parcelFt, frame, centroid, totalFaceFt, groupDepthFt, startU, targetV,
   );
   if (!groupCenter) return failAll('Group bounding box does not fit at parcelFrontage');
   const placed = { ...bSpec, ...groupCenter };
@@ -546,7 +557,9 @@ function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
   const targetV   = vFront + setbackFt + halfDepth;
 
   let targetU = 0; // default: parcel centroid's u-coordinate (centered)
-  if (alignU === 'left' || alignU === 'right') {
+  if (typeof alignU === 'number') {
+    targetU = alignU; // direct local-frame u-coordinate in feet
+  } else if (alignU === 'left' || alignU === 'right') {
     const us  = parcelFt.map(p => feetToLocal(p, frame).u);
     const uMin = Math.min(...us), uMax = Math.max(...us);
     const pad  = setbackFt + bSpec.length_ft / 2;
