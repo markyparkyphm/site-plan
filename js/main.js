@@ -6,12 +6,15 @@ import { renderLayoutOnCanvas } from './render.js';
 import { exportToPng } from './export.js';
 import { parseInstructions } from './ai.js';
 import { score, PROFILES } from './score.js';
-import { optimizeLayout } from './optimize.js';
+import { optimizeLayout, optimizeArrangement } from './optimize.js';
 import { realizeArrangement } from './arrange.js';
 
-// Phase A flag: set true to route onSolve through realizeArrangement for testing.
-// The existing solver path (solveLayout → optimizeLayout) is unchanged when false.
+// Routes onSolve through realizeArrangement (Phase D/E arranger).
 const USE_ARRANGER = true;
+
+// Routes the Optimize button through optimizeArrangement (schema optimizer, Phase 1).
+// Set false to fall back to the legacy 4-basin-corner optimizeLayout search.
+const USE_SCHEMA_OPTIMIZER = true;
 
 const TERM_LABELS = {
   buildingsPlaced: 'Buildings placed',
@@ -460,16 +463,42 @@ function renderLayout(layout, reqs, isDeterministic, frontageHint) {
 
 function onOptimize() {
   clearSolveOverlays();
+  document.getElementById('optimizer-panel').style.display = 'none';
   document.getElementById('status').textContent = 'Optimizing…';
 
   const frontageVal = document.getElementById('input-frontage').value;
   const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
+  const reqs = getReqs();
 
+  if (USE_SCHEMA_OPTIMIZER) {
+    try {
+      const { ranked, totalTried } = optimizeArrangement(parcelLatLng, reqs, frontage, PROFILES.retail);
+      if (ranked.length === 0) {
+        document.getElementById('status').textContent =
+          `No feasible layouts found (${totalTried} candidates tried).`;
+        return;
+      }
+      const best = ranked[0];
+      lastLayout = best.layout;
+      renderLayout(best.layout, reqs, true, frontage);
+      showSchemaOptimizerResult(ranked, PROFILES.retail.searchConfig.topK ?? 4);
+      document.getElementById('btn-render').disabled = false;
+      const k = best.schema._knobs;
+      document.getElementById('status').textContent =
+        `Schema optimizer: ${ranked.length} feasible / ${totalTried} tried` +
+        ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${k.alignU}`;
+    } catch (err) {
+      console.error('[optimizeArrangement] error:', err);
+      document.getElementById('status').textContent = 'Optimizer error: ' + err.message;
+    }
+    return;
+  }
+
+  // Legacy path: 4-basin-corner search via solveLayout
   const baseHints = {
     setbackFt:   parseFloat(document.getElementById('input-setback').value) || 20,
     clearanceFt: aiHints.clearanceFt ?? 30,
   };
-  const reqs = getReqs();
   const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
 
   const { best, all } = optimizeLayout(
@@ -508,6 +537,37 @@ function showOptimizerResult(best, all) {
       row.appendChild(note);
     }
 
+    container.appendChild(row);
+  });
+
+  document.getElementById('optimizer-panel').style.display = 'flex';
+}
+
+function showSchemaOptimizerResult(ranked, topK) {
+  const topN = ranked.slice(0, topK);
+  const best = topN[0];
+  const k = best.schema._knobs;
+  document.getElementById('optimizer-winner-label').innerHTML =
+    `<span class="opt-winner-label">` +
+    `Winner: setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${k.alignU}` +
+    `</span>`;
+
+  const container = document.getElementById('optimizer-candidates');
+  container.innerHTML = '';
+
+  topN.forEach((c, i) => {
+    const ck = c.schema._knobs;
+    const row = document.createElement('div');
+    row.className = 'opt-candidate' + (i === 0 ? ' opt-candidate-winner' : '');
+    const dwLabel = Array.isArray(ck.driveways) ? ck.driveways.join('/') : ck.driveways;
+    row.innerHTML =
+      `<span class="opt-rank">#${i + 1}</span>` +
+      `<span class="opt-params">` +
+        `${ck.basinCorner} · ${ck.setbackFt}ft · ${ck.alignU}` +
+        (ck.gapFt > 0 ? ` · gap ${ck.gapFt}ft` : '') +
+        ` · dw:${dwLabel}` +
+      `</span>` +
+      `<span class="opt-score">${c.total.toFixed(2)}</span>`;
     container.appendChild(row);
   });
 

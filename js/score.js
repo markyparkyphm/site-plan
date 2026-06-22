@@ -19,6 +19,22 @@ export const PROFILES = {
     aisleFt:              24,
     drivewayWidthFt:      24,
     gapFt:                10,
+    // Schema-optimizer search config — value-sets and grids for optimizeArrangement.
+    // All knobs live here, not in optimize.js, so profiles control the search space.
+    searchConfig: {
+      // Discrete knobs (cross-product enumerated)
+      layout:        ['strip'],                              // group layout for multi-building
+      gapFt:         [0, 20],                               // inter-building gap (ft) inside a group
+      parkingFaces:  ['front'],                             // which building faces to park against
+      driveways:     [['left'], ['center'], ['right'], ['left', 'right']], // entryU sets per candidate
+      basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
+      // Coarse continuous knobs (sampled grid; Phase 2 refines)
+      setbackFt:     [15, 25, 35],                          // parcel setback before building placement
+      alignU:        ['left', 'center', 'right'],           // lateral alignment of building/group
+      // Search limits
+      maxCandidates: 500,   // hard cap on generator output (prevents runaway if config widens)
+      topK:          4,     // candidates shown in the optimizer panel
+    },
   },
 };
 
