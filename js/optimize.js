@@ -203,7 +203,15 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile) {
 
   for (const schema of generateCandidates(reqs, frontage, searchConfig)) {
     totalTried++;
-    const { elements } = realizeArrangement(schema, parcelLngLat, profile);
+
+    let elements;
+    try {
+      ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+    } catch (_) {
+      // Turf/JSTS throws on degenerate geometry (self-intersecting rings, near-zero
+      // areas). Treat as infeasible and continue — don't abort the whole search.
+      continue;
+    }
 
     // Feasibility gate: disqualify the candidate if any element failed.
     // All elements in a generated schema are required — partial failure = invalid plan.
