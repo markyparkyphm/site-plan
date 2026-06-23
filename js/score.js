@@ -18,6 +18,7 @@ export const PROFILES = {
     stallDepthFt:         18,
     aisleFt:              24,
     drivewayWidthFt:      24,
+    defaultDriveLengthFt: null,   // null → derive functional length (span to served element's far edge)
     gapFt:                10,
     // Schema-optimizer search config — value-sets and grids for optimizeArrangement.
     // All knobs live here, not in optimize.js, so profiles control the search space.
@@ -37,9 +38,10 @@ export const PROFILES = {
       displayK:      10,    // rows shown in the step-through optimizer panel
       // Phase 2 local-refinement config
       refineConfig: {
-        setbackStep:    2,                  // ft between fine setback samples
-        setbackRange:   9,                  // ±ft around Phase 1 winner setback value
-        alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+        setbackStep:          2,                       // ft between fine setback samples
+        setbackRange:         9,                       // ±ft around Phase 1 winner setback value
+        alignOffsetsFt:       [-60, -30, 0, 30, 60],  // u-offsets (ft) from base Phase 1 alignU
+        driveLengthOffsetsFt: [-40, -20, 0, 20, 40],  // ft offsets from winner's realized driveway length
       },
     },
   },

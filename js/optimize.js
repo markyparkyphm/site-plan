@@ -73,7 +73,8 @@ function layoutFromElements(elements) {
 //   parkingFaces — string like 'front' or 'front+rear'; split on '+' to get face list
 //   driveways    — array of entryU strings for this candidate, e.g. ['left','right']
 export function buildCandidateSchema(reqs, frontage, knobs) {
-  const { layout, gapFt, parkingFaces, driveways, basinCorner, setbackFt, alignU } = knobs;
+  const { layout, gapFt, parkingFaces, driveways, basinCorner, setbackFt, alignU,
+          drivewayLengthFt } = knobs;
   const elements = [];
   if (reqs.buildings.length === 0) return { frontage, elements, _knobs: knobs };
 
@@ -128,10 +129,12 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
       // Driveways connect parcelFrontage to front parking only.
       if (face === 'front') {
         driveways.forEach((entryU, di) => {
+          const dwSize = { widthFt: 24 };
+          if (Number.isFinite(drivewayLengthFt)) dwSize.lengthFt = drivewayLengthFt;
           elements.push({
             id:    `d${fi * 10 + di + 1}`,
             type:  'driveway',
-            size:  { widthFt: 24 },
+            size:  dwSize,
             place: { connects: 'parcelFrontage', to: parkId, entryU },
           });
         });
@@ -244,29 +247,44 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
     const baseU  = alignUToFeet(k.alignU, parcelFt, frame, faceFt, k.setbackFt);
     const alignUs = refineConfig.alignOffsetsFt.map(off => baseU + off);
 
-    for (const setbackFt of uniqueSetbacks) {
-      for (const alignU of alignUs) {
-        tried++;
-        const schema = buildCandidateSchema(reqs, frontage, { ...k, setbackFt, alignU });
+    // Drive length refinement: offsets from the winner's first realized driveway length.
+    // Falls back to [undefined] (single pass, functional default) when no driveways present.
+    const offs = refineConfig.driveLengthOffsetsFt ?? [0];
+    const baseDriveLen = winner.layout?.driveways?.[0]?.properties?.lengthFt;
+    const driveLengths = Number.isFinite(baseDriveLen)
+      ? [...new Set(offs.map(o => Math.max(10, Math.round(baseDriveLen + o))))]
+      : [undefined];
 
-        let elements;
-        try {
-          ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
-        } catch (_) { continue; }
+    for (const drivewayLengthFt of driveLengths) {
+      for (const setbackFt of uniqueSetbacks) {
+        for (const alignU of alignUs) {
+          tried++;
+          const schema = buildCandidateSchema(
+            reqs, frontage,
+            Number.isFinite(drivewayLengthFt)
+              ? { ...k, setbackFt, alignU, drivewayLengthFt }
+              : { ...k, setbackFt, alignU }
+          );
 
-        if (elements.some(e => !e.feasible)) continue;
+          let elements;
+          try {
+            ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
+          } catch (_) { continue; }
 
-        const layout = layoutFromElements(elements);
-        const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
-        candidates.push({
-          schema,
-          layout,
-          total:    result.total,
-          maxScore: result.maxScore,
-          terms:    result.terms,
-          feasible: true,
-          source:   'grid',
-        });
+          if (elements.some(e => !e.feasible)) continue;
+
+          const layout = layoutFromElements(elements);
+          const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+          candidates.push({
+            schema,
+            layout,
+            total:    result.total,
+            maxScore: result.maxScore,
+            terms:    result.terms,
+            feasible: true,
+            source:   'grid',
+          });
+        }
       }
     }
   }
@@ -278,7 +296,8 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
 // driveways array is sorted so ['right','left'] and ['left','right'] hash identically.
 export function knobSig(k) {
   const dw = Array.isArray(k.driveways) ? [...k.driveways].sort().join(',') : String(k.driveways);
-  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}`;
+  const dl = Number.isFinite(k.drivewayLengthFt) ? k.drivewayLengthFt : 'def';
+  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}|${dl}`;
 }
 
 // Score AI knob-sets on the main thread with the same turf monkey-patch used inside the
