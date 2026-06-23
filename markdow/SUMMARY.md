@@ -43,7 +43,7 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | 5b | main.js: wire `aiHints.frontage` into `onSolve` hints | 96d9b13 |
 | 5c | main.js `onApplyAI`: reflect parsed frontage back into `#input-frontage` element | 189c475 |
 | — | Fix: E/W driveway bbox-anchor bug on slanted parcels | 781f786 |
-| — | Fix: E/W parking multi-lat edge sampling (`sampleEdgeLng`) | 35eafbe |
+ | — | Fix: E/W parking multi-lat edge sampling (`sampleEdgeLng`) | 35eafbe |
 | — | Fix: S/N parking stall loss on slanted/tilted parcels (`sampleEdgeLat` + scan) | 189c475 |
 
 ### Scoring, Optimizer, Relational Placement (all done)
@@ -67,6 +67,8 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | AI Schema-Proposer Phase 1: proposeArrangements (Gemini knob-set proposals, main-thread, 4 s timeout, AbortController), aiSeeds merge into ranked list tagged source:'ai', knobSig dedup vs grid, opt-ai-tag badge in UI | js/ai.js + js/optimize.js + js/optimizer-worker.js + js/main.js + styles.css | — | ✅ |
 | Fix maxScore computation in score.js: sum scoring term weights only (not all profile values) — was 600.15, now correctly 4.15 for retail | js/score.js | — | ✅ (on disk, not yet committed) |
 | AI Schema-Proposer Phase 2: 3 bias templates (visibility/parking/compact) fired concurrently via Promise.allSettled; Gemini runs parallel to worker (not sequential) to hide latency; richer parcel description (aspect ratio + shape note); AI seeds scored on main thread via scoreAiSeeds export; knobSig exported; debug console.log removed; status shows "· N AI" count | js/ai.js + js/optimize.js + js/main.js | — | ✅ |
+| Driveway Length Knob Phase 1: unweld vTarget in realizeDriveway — functional default spans road→parking far edge (building face); knob priority chain size.lengthFt > profile.defaultDriveLengthFt > functional; attach {lengthFt, widthFt, entryU} to feature.properties and element; add defaultDriveLengthFt:null to PROFILES.retail; JSTS monkey-patch added to realizeArrangement (same as optimizeArrangement) to fix multi-building Solve path | js/arrange.js + js/score.js | — | ✅ |
+| Driveway Length Knob Phase 2: drivewayLengthFt wired into schema optimizer — buildCandidateSchema applies size.lengthFt when knob is finite; knobSig gains \|dl segment; refineArrangement adds outer driveLengths loop (offsets from winner's realized length, falls back to [undefined] when no driveways); driveLengthOffsetsFt:[-40,-20,0,20,40] added to searchConfig.refineConfig; Phase 2 candidates ≈900 vs 180 before | js/optimize.js + js/score.js | — | ✅ |
 
 ---
 

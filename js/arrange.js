@@ -313,14 +313,27 @@ function realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, rea
     default:      uCenter = (targetBounds.uMin + targetBounds.uMax) / 2; break;
   }
 
-  // v range: from the actual parcel boundary at this driveway's u-position (with a 50 ft
-  // over-extension so the clip to parcelTurf trims it exactly to the road edge) to the
-  // target's near face. Using frontageVAtU instead of global frontageV prevents the
-  // driveway rectangle from starting inside the parcel on diagonal-edge lots.
-  // Minimum depth = driveway width (halfWidth × 2) so the driveway is never a hair-thin
-  // line when parking extends all the way to the parcel boundary.
-  const vFront  = frontageVAtU(parcelFt, frame, uCenter);
-  const vTarget = Math.max(targetBounds.vMin, vFront + halfWidth * 2);
+  // frontageVAtU finds the actual parcel boundary v at this driveway's u-position, needed
+  // for diagonal/irregular parcels where global frontageV is only accurate at one vertex.
+  const vFront = frontageVAtU(parcelFt, frame, uCenter);
+
+  // Functional default: span from road edge to the served element's far edge.
+  // When no target element (parcelFrontage-only), vMax === vFront → functionalLenFt = 0
+  // → vTarget = vFront+1, matching original behavior.
+  const functionalLenFt = Number.isFinite(targetBounds.vMax)
+    ? (targetBounds.vMax - vFront)
+    : (targetBounds.vMin - vFront);
+
+  // Knob priority: schema size.lengthFt > profile.defaultDriveLengthFt > functional default.
+  const reqLenFt = (Number.isFinite(size.lengthFt)              ? size.lengthFt
+                 : Number.isFinite(profile.defaultDriveLengthFt) ? profile.defaultDriveLengthFt
+                 : functionalLenFt);
+
+  // No upper clamp to parcelVMax: clamping creates an edge exactly coincident with the
+  // parcel boundary, which triggers a JSTS "Unable to complete output ring" error in
+  // turf.intersect. The intersect clip below trims the rectangle to the parcel anyway,
+  // just as the -50 ft over-extension already does on the road side.
+  const vTarget = Math.max(vFront + 1, vFront + reqLenFt);
 
   const ring = [
     [uCenter - halfWidth, vFront - 50],
@@ -336,12 +349,28 @@ function realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, rea
   const dwRect = turf.polygon([ring]);
 
   // Clip to parcel (not free — driveways pass through the setback zone below parking).
-  const clipped = turf.intersect(parcelTurf, dwRect);
+  let clipped;
+  try {
+    clipped = turf.intersect(parcelTurf, dwRect);
+  } catch (_) {
+    clipped = null;
+  }
   if (!clipped) {
     return { id: el.id, type: 'driveway', feasible: false, reason: 'No overlap with parcel' };
   }
 
-  return { id: el.id, type: 'driveway', feasible: true, feature: clipped };
+  const realizedLenFt = vTarget - vFront;
+  clipped.properties = {
+    ...(clipped.properties ?? {}),
+    lengthFt: realizedLenFt,
+    widthFt:  halfWidth * 2,
+    entryU,
+  };
+  return {
+    id: el.id, type: 'driveway', feasible: true,
+    feature: clipped,
+    lengthFt: realizedLenFt,
+  };
 }
 
 // Find a position for a W×D (local frame) rectangle in `free`, scanning forward
@@ -793,6 +822,18 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
   const results    = [];
   let   free       = free0;
 
+  // JSTS "output ring" guard: multi-building groups create exactly coincident boundary
+  // segments between the group clearance buffer and child building clearance buffers
+  // (hit in realizeParking's turf.union). Same patch as optimizeArrangement; always
+  // restored in finally so nothing outside realizeArrangement is affected.
+  const origUnion      = turf.union;
+  const origDifference = turf.difference;
+  const origIntersect  = turf.intersect;
+  turf.union      = (a, b) => { try { return origUnion(a, b);      } catch (_) { return null; } };
+  turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
+  turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
+
+  try {
   for (const id of order) {
     const el = elementMap[id];
     if (!el) continue;
@@ -846,4 +887,9 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
   }
 
   return { elements: results, freeRemaining: free };
+  } finally {
+    turf.union      = origUnion;
+    turf.difference = origDifference;
+    turf.intersect  = origIntersect;
+  }
 }
