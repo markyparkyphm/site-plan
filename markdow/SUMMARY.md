@@ -11,7 +11,7 @@ satellite imagery background and exports as PNG.
 
 ## Current status
 
-All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–E + Schema Optimizer Phases 1–3 + AI Schema-Proposer Phase 1 COMPLETE.
+All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arrange Phases A–E + Schema Optimizer Phases 1–3 + AI Schema-Proposer Phases 1–2 + Road Detection Phases 1–2 + Driveway Length Knob + Driveway Scoring (Phases 1–3) COMPLETE.
 
 ### Phase history
 | Phase | What was built | Commit |
@@ -69,6 +69,8 @@ All Phases 0–7 + post-review fixes + Frontage task + Scoring + Optimizer + Arr
 | AI Schema-Proposer Phase 2: 3 bias templates (visibility/parking/compact) fired concurrently via Promise.allSettled; Gemini runs parallel to worker (not sequential) to hide latency; richer parcel description (aspect ratio + shape note); AI seeds scored on main thread via scoreAiSeeds export; knobSig exported; debug console.log removed; status shows "· N AI" count | js/ai.js + js/optimize.js + js/main.js | — | ✅ |
 | Driveway Length Knob Phase 1: unweld vTarget in realizeDriveway — functional default spans road→parking far edge (building face); knob priority chain size.lengthFt > profile.defaultDriveLengthFt > functional; attach {lengthFt, widthFt, entryU} to feature.properties and element; add defaultDriveLengthFt:null to PROFILES.retail; JSTS monkey-patch added to realizeArrangement (same as optimizeArrangement) to fix multi-building Solve path | js/arrange.js + js/score.js | — | ✅ |
 | Driveway Length Knob Phase 2: drivewayLengthFt wired into schema optimizer — buildCandidateSchema applies size.lengthFt when knob is finite; knobSig gains \|dl segment; refineArrangement adds outer driveLengths loop (offsets from winner's realized length, falls back to [undefined] when no driveways); driveLengthOffsetsFt:[-40,-20,0,20,40] added to searchConfig.refineConfig; Phase 2 candidates ≈900 vs 180 before | js/optimize.js + js/score.js | — | ✅ |
+| Fix: 2-driveway candidates never surfaced — generateCandidates tried all 4 drivewaySet combos regardless of reqs.driveways; now filters to sets matching the requested count | js/optimize.js | — | ✅ |
+| Driveway Scoring Phase 3 (driveway-spec): replace accessQuality (−0.25 area-ratio penalty) with drivewayConnected (0.4, near-binary gate — do lanes reach detected road?) + drivewayLength (0.3, plateau scoring on realized lane depth vs building face depth); road = null threaded through score() signature, all 5 score() calls in optimize.js, 3 function signatures (optimizeLayout/refineArrangement/scoreAiSeeds/optimizeArrangement), 3 main.js call sites, and optimizer-worker.js postMessage destructure; 4 profile knobs added (drivewayConnectThreshFt/Lo/Hi/Falloff); retail maxScore 4.55 → 5.25 | js/score.js + js/optimize.js + js/main.js + js/optimizer-worker.js | — | ✅ |
 
 ---
 
@@ -165,7 +167,9 @@ convert `realizeArrangement` output into this same shape.
 ```javascript
 import { score, PROFILES } from './score.js';
 
-const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, PROFILES.retail);
+const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, PROFILES.retail, road);
+// road = detectedRoad from road.js: { cardinal, line (Turf LineString WGS84), nearestPt, distanceFt }
+//        or null (neutral: drivewayConnected scores 1)
 // result: { total, maxScore, terms }
 // terms: { termName: { raw, weight, contribution } }
 ```
@@ -176,60 +180,69 @@ const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, PROFILES.
 
 ### PROFILES.retail
 ```javascript
-// Scoring weights
-buildingsPlaced: 1.0    // fraction of requested buildings placed
-parkingMet:      0.9    // gotStalls / reqStalls, capped at 1
-parkingInFront:  0.7    // parking center depth < building center depth → in front
-roadVisibility:  0.6    // mean building setback in plateau(60, 200, 250) ft band
-coverageTarget:  0.5    // building footprint / parcel area in plateau(0.20, 0.25, 0.20)
-accessQuality:  -0.25   // PENALTY: driveway area / parcel area / 0.05
-basinAccuracy:   0.3    // 1 - |gotBasinSqFt - targetSqFt| / targetSqFt
-compactness:     0.15   // 1 - buildingSpread / parcelDiagonal (multi-building only)
-openSpace:       0.0    // placeholder (irrelevant for retail)
+// Scoring weights (Phase 3 driveway scoring — accessQuality RETIRED)
+buildingsPlaced:   1.0    // fraction of requested buildings placed
+parkingMet:        0.9    // gotStalls / reqStalls, capped at 1
+parkingInFront:    0.7    // parking center depth < building center depth → in front
+roadVisibility:    0.6    // mean building setback in plateau(60, 200, 250) ft band
+coverageTarget:    0.5    // building footprint / parcel area in plateau(0.20, 0.25, 0.20)
+drivewayConnected: 0.4    // fraction of driveways that intersect a 30 ft buffer around detected road
+                          // neutral = 1 when road is null (no road detected) or no driveways
+drivewayLength:    0.3    // plateau(realizedLen / meanBldgDepth, lo=0.6, hi=1.0, falloff=0.5)
+                          // rewards lanes that span the parking depth; penalizes gross overshoot
+                          // neutral = 1 when no driveways or no buildings
+drivewayPresent:   0.4    // 1 if any driveway placed, 0 if none
+basinAccuracy:     0.3    // 1 - |gotBasinSqFt - targetSqFt| / targetSqFt
+compactness:       0.15   // 1 - buildingSpread / parcelDiagonal (multi-building only)
+openSpace:         0.0    // placeholder (irrelevant for retail)
 
 // Placement defaults (used by arrange.js — read from profile, not hardcoded)
-setbackFt:            20    // parcel setback before placement
-clearanceFt:          30    // building-to-building clearance gap
-maxBuildingDepthFt:   70    // max building depth from road (arrange.js size derivation)
-minBuildingAreaSqFt: 400    // minimum viable area (feasibility check for parking too)
-stallDepthFt:         18    // parking stall depth
-aisleFt:              24    // parking aisle width
-drivewayWidthFt:      24    // driveway strip width
-gapFt:                10    // gap between elements (parking → free subtraction)
+setbackFt:             20    // parcel setback before placement
+clearanceFt:           30    // building-to-building clearance gap
+maxBuildingDepthFt:    70    // max building depth from road (arrange.js size derivation)
+minBuildingAreaSqFt:  400    // minimum viable area (feasibility check for parking too)
+stallDepthFt:          18    // parking stall depth
+aisleFt:               24    // parking aisle width
+drivewayWidthFt:       24    // driveway strip width
+defaultDriveLengthFt: null   // null → derive functional length (road → building far face)
+gapFt:                 10    // gap between elements (parking → free subtraction)
+// Driveway scoring knobs (Phase 3)
+drivewayConnectThreshFt: 30   // buffer (ft) around road.line to test driveway intersection
+drivewayLengthLo:        0.6  // ratio below which drivewayLength scores < 1
+drivewayLengthHi:        1.0  // ratio above which drivewayLength starts to decay
+drivewayLengthFalloff:   0.5  // how fast the score decays past hi
 
-// Schema-optimizer search config (added for Phase 1 — all value-sets live here, NOT in optimize.js)
+// Schema-optimizer search config (all value-sets live here, NOT in optimize.js)
 searchConfig: {
   layout:        ['strip'],
   gapFt:         [0, 20],
   parkingFaces:  ['front'],
   driveways:     [['left'], ['center'], ['right'], ['left', 'right']],
+  // NOTE: generateCandidates filters this list to sets whose .length === reqs.driveways
+  // so a user requesting 2 driveways only gets ['left','right'] candidates, not single-driveway ones
   basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
   setbackFt:     [15, 25, 35],
   alignU:        ['left', 'center', 'right'],
   maxCandidates: 500,
   topK:          4,    // Phase 2 refines around this many Phase 1 winners
-  displayK:      10,   // rows shown in the step-through optimizer panel (Phase 3)
+  displayK:      10,   // rows shown in the step-through optimizer panel
   refineConfig: {
-    setbackStep:    2,                      // ft between fine setback samples
-    setbackRange:   9,                      // ±ft around Phase 1 winner value
-    alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+    setbackStep:          2,                       // ft between fine setback samples
+    setbackRange:         9,                       // ±ft around Phase 1 winner value
+    alignOffsetsFt:       [-60, -30, 0, 30, 60],  // u-offsets (ft) from base Phase 1 alignU
+    driveLengthOffsetsFt: [-40, -20, 0, 20, 40],  // ft offsets from winner's realized driveway length
   },
 }
 ```
 
-Max score for retail = sum of positive weights = 1.0+0.9+0.7+0.6+0.5+0.3+0.15 = **4.15**.
+**Max score for retail = 1.0+0.9+0.7+0.6+0.5+0.4+0.3+0.4+0.3+0.15 = 5.25** (after Phase 3 driveway scoring).
 Score panel shows `total.toFixed(2) / maxScore.toFixed(2)`.
 
-**maxScore computation (bugfix — on disk, not yet committed):**
+**maxScore computation** (fixed — `score()` sums only scored term weights):
 ```javascript
-// OLD (buggy): summed all positive numeric values in profile, including placement defaults
-// (setbackFt:20, clearanceFt:30, maxBuildingDepthFt:70, etc.) → total was ~600.15
-const maxScore = Object.values(W).filter(w => w > 0).reduce((s, w) => s + w, 0);
-
-// NEW (correct): sums only the weights of scored terms, always 4.15 for retail
+// Correct: only sums weights of scored terms, not all profile values
 const maxScore = Object.values(terms).reduce((s, t) => t.weight > 0 ? s + t.weight : s, 0);
 ```
-The root cause: `PROFILES.retail` contains both scoring weights and placement defaults in the same flat object. `Object.values(W)` included all of them.
 
 ### Score helpers
 ```javascript
@@ -258,7 +271,8 @@ Parking `center_x_ft`/`center_y_ft` similarly uses `latLngToFeetFromCentroid`. A
 Score is computed inside `renderLayout(layout, reqs, isDeterministic, frontageHint)`:
 ```javascript
 const resolvedFrontage = ['N','S','E','W'].includes(frontageHint) ? frontageHint : 'S';
-const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail);
+const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail, detectedRoad);
+// detectedRoad is module-scoped (line ~41); null until Overpass query succeeds
 // then populate #score-total and #score-breakdown
 ```
 
@@ -308,7 +322,7 @@ Returns `{ setbackFt?, clearanceFt?, basinCorner?, orientationPreference?, front
 
 ### Legacy optimizer (behind USE_SCHEMA_OPTIMIZER = false)
 ```javascript
-export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage)
+export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage, road = null)
 // Tries 4 basin corners (SW/SE/NW/NE), scores each, returns { best, all }.
 // frontage is FIXED — never searched. Hard architectural rule.
 ```
@@ -317,29 +331,38 @@ export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt,
 
 **Entry point:**
 ```javascript
-export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = [])
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = [], road = null)
 // Returns { ranked, totalTried }
 // ranked: array of { schema, layout, total, maxScore, terms, feasible:true, source:'ai'|'grid' } sorted by total desc
 // totalTried: count of all candidates attempted across AI seeds + Phase 1 + Phase 2 (including infeasible ones)
 //
+// road: detectedRoad object (Turf LineString WGS84) or null — threaded to all score() calls
+//   GeoJSON is structured-cloneable so it crosses postMessage to the worker without special handling.
+//
 // onProgress(callback): called whenever a new best candidate is found during the search.
 //   callback receives { best: candidate, totalTried }
-//   Used by the Web Worker (Phase 3) to stream progress to the main thread.
-//   Pass null (default) for the synchronous/legacy path.
+//   Used by the Web Worker to stream progress to the main thread. Pass null for synchronous path.
 //
 // aiSeeds: pre-validated knob-set objects from proposeArrangements (main thread).
 //   Scored first through the identical realize→gate→score pipeline as grid candidates.
 //   Deduped against Phase 1 grid via knobSig. Pass [] for a purely deterministic run.
 ```
 
+**Internal signatures (road threaded through):**
+```javascript
+function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt, road = null)
+export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road = null)
+```
+
 **`knobSig` deduplication helper:**
 ```javascript
-function knobSig(k) {
+export function knobSig(k) {
   const dw = Array.isArray(k.driveways) ? [...k.driveways].sort().join(',') : String(k.driveways);
-  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}`;
+  const dl = Number.isFinite(k.drivewayLengthFt) ? k.drivewayLengthFt : 'def';
+  return `${k.layout}|${k.gapFt}|${k.parkingFaces}|${dw}|${k.basinCorner}|${k.setbackFt}|${k.alignU}|${dl}`;
 }
 ```
-Builds a stable string key for a knob-set. Driveways array is sorted so `['right','left']` and `['left','right']` hash identically. Used to prevent AI seeds from being re-scored as Phase 1 grid candidates.
+Driveways array is sorted so `['right','left']` and `['left','right']` hash identically. `dl` segment ensures candidates differing only in driveway length are not deduplicated. Used to prevent AI seeds from being re-scored as Phase 1 grid candidates.
 
 **AI seeds execution (inside try block, after turf monkey-patch):**
 ```javascript
@@ -368,21 +391,24 @@ AI seeds run first so they can beat or tie the grid candidates. Phase 1 grid ski
 - = **288 candidates**, well under maxCandidates=500
 
 **Phase 2 — `refineArrangement(topKWinners, ...)` (internal):**
-After Phase 1 ranking, takes top-K winners and refines two continuous knobs:
+After Phase 1 ranking, takes top-K winners and refines three continuous knobs:
 - **setbackFt**: fine grid ±`refineConfig.setbackRange` (9 ft) in `refineConfig.setbackStep` (2 ft) steps around each winner's value, skipping Phase 1 values already tried → ~9 new setback values per winner
 - **alignU (numeric)**: converts the winner's string `alignU` to a base u-coordinate in local feet, then tries `refineConfig.alignOffsetsFt` ([-60,-30,0,30,60] ft) offsets → 5 numeric u-positions per winner
+- **drivewayLengthFt**: derives base from winner's realized first driveway `properties.lengthFt`, applies `driveLengthOffsetsFt` ([-40,-20,0,20,40] ft) → 5 length variants per winner (or [undefined] when no driveways)
 
-Per-winner candidate count: ~9 setbacks × 5 alignU = ~45 candidates × topK=4 winners = **~180 Phase 2 candidates**.
+Per-winner candidate count: ~9 setbacks × 5 alignU × 5 driveLengths = ~225 candidates × topK=4 winners = **~900 Phase 2 candidates**.
 
-`buildCandidateSchema` accepts numeric `alignU` (passes it to the schema's `place` spec).
-`realizeBuilding` and `realizeGroup` both support numeric `alignU` as a direct local-frame u-coordinate (feet from parcel centroid along t̂). Groups: numeric `alignU` becomes `startU` for `scanGroupPlacement` (previously ignored for groups).
+`buildCandidateSchema` accepts numeric `alignU` and `drivewayLengthFt`:
+- Numeric `alignU` passes directly to the schema's `place` spec; `realizeBuilding`/`realizeGroup` use it as a local-frame u-coordinate (feet from parcel centroid along t̂)
+- `drivewayLengthFt` sets `size.lengthFt` on each driveway element when finite; omitted when `undefined` (functional default applies)
 
 **Phase 2 `refineConfig` (in `profile.searchConfig`):**
 ```javascript
 refineConfig: {
-  setbackStep:    2,                      // ft between fine setback samples
-  setbackRange:   9,                      // ±ft around Phase 1 winner value
-  alignOffsetsFt: [-60, -30, 0, 30, 60], // u-offsets (ft) from base Phase 1 alignU
+  setbackStep:          2,                       // ft between fine setback samples
+  setbackRange:         9,                       // ±ft around Phase 1 winner value
+  alignOffsetsFt:       [-60, -30, 0, 30, 60],  // u-offsets (ft) from base Phase 1 alignU
+  driveLengthOffsetsFt: [-40, -20, 0, 20, 40],  // ft offsets from winner's realized driveway length
 }
 ```
 
@@ -395,14 +421,32 @@ Single building → individual element; multiple buildings → strip group with 
 Generator that yields one schema per cross-product point. Caps at `maxCandidates`. All
 value-sets come from `searchConfig` (in the profile), not hardcoded.
 
+**Driveway count filtering (bug fix):**
+```javascript
+// Before entering the loop, filter drivewaySets to only those matching reqs.driveways count.
+// Without this, a user requesting 2 driveways got 3 single-driveway candidates for every
+// 1 double-driveway candidate, so single-driveway layouts always dominated the top-10.
+const reqDwCount = reqs.driveways ?? 1;
+const filteredDrivewaySets = drivewaySets.filter(s => s.length === reqDwCount);
+const activeDrivewaySets = filteredDrivewaySets.length > 0 ? filteredDrivewaySets : drivewaySets;
+```
+
 **`layoutFromElements(elements)`:**
 Adapts `realizeArrangement` output to the `layout` shape `score.js` expects.
 Identical logic to `layoutFromArrangement` in main.js but lives in optimize.js
 so optimizeArrangement is self-contained.
 
-**Feasibility gate:**
+**Feasibility gate (lenient — buildings only):**
 ```javascript
-if (elements.some(e => !e.feasible)) continue;  // disqualify — do not score
+// isCandidateViable: only building failures disqualify a candidate.
+// Parking/driveway/basin failures reduce score via parkingMet/drivewayPresent/basinAccuracy
+// rather than hard-disqualifying. Tight parcels where only partial placements fit should still
+// appear in the ranked list rather than causing "No feasible layouts found".
+function isCandidateViable(elements) {
+  const buildings = elements.filter(e => e.type === 'building');
+  return buildings.some(e => e.feasible);
+}
+if (!isCandidateViable(elements)) continue;
 ```
 
 **`notifyIfBetter` (internal helper inside `optimizeArrangement`):**
@@ -469,19 +513,21 @@ globalThis.turf = { ...turfNS };  // mutable plain object — frozen namespace w
 import { optimizeArrangement } from './optimize.js';
 
 self.onmessage = ({ data }) => {
-  const { parcelLatLng, reqs, frontage, profile, aiSeeds = [] } = data;
+  const { parcelLatLng, reqs, frontage, profile, aiSeeds = [], road = null } = data;
   const { ranked, totalTried } = optimizeArrangement(
     parcelLatLng, reqs, frontage, profile,
     (progress) => self.postMessage({ type: 'progress', ...progress }),
     aiSeeds,
+    road,
   );
   self.postMessage({ type: 'done', ranked, totalTried });
 };
 ```
 
 **Worker message protocol:**
-- Main → worker: `{ parcelLatLng, reqs, frontage, profile }` via `postMessage`
+- Main → worker: `{ parcelLatLng, reqs, frontage, profile, road }` via `postMessage`
   - `profile` = `PROFILES.retail` — all primitives/arrays, fully structured-cloneable ✓
+  - `road` = `detectedRoad` (GeoJSON LineString) or `null` — structured-cloneable ✓
   - Turf polygon results in `ranked` are GeoJSON (plain objects) — also cloneable ✓
 - Worker → main (`type: 'progress'`): `{ type, best: candidate, totalTried }`
   - Fired only on new best — typically 5–15 times per full run
@@ -512,7 +558,7 @@ let lastFrontage    = 'S';   // frontage at time of last optimize click
    - Computes `parcelSummary = { acres, widthFt, depthFt }` from `parcelFt` bounding box
    - If user cancelled during the Gemini await (btn-optimize re-enabled by cancel handler), return early
 5. Set status `'Optimizing…'`, spawn new worker via `new Worker('./js/optimizer-worker.js', { type: 'module' })`
-6. `worker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds })`
+6. `worker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds, road: detectedRoad })`
 7. On `progress` message: `clearSolveOverlays()`, render `best.layout` live, update status text
 8. On `done` message: restore buttons, populate `lastRanked`, render winner, call `showSchemaOptimizerResult(ranked)`
 9. On `onerror`: restore buttons, log to console, show error in status bar
@@ -1104,6 +1150,14 @@ Commit: 6767a1f
 | 2 | 3 bias templates (visibility/parking/compact) via Promise.allSettled; Gemini fires concurrently with worker; seeds scored on main thread via scoreAiSeeds; richer parcel description (aspect + shape note) | ✅ Done |
 | Deploy | Backend proxy for Gemini key; rotate keys; lock Maps key with HTTP-referrer restriction | Not started |
 
+## Phase roadmap (driveway length + scoring — `driveway-spec.md`)
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Unweld driveway vTarget — functional default spans road→building far face; knob priority chain size.lengthFt > profile.defaultDriveLengthFt > functional; `frontageVAtU` for diagonal parcels; attach {lengthFt, widthFt, entryU} to feature.properties + element | ✅ Done |
+| 2 | Expose drivewayLengthFt to optimizer — buildCandidateSchema applies it; knobSig gains \|dl; refineArrangement adds outer driveLengths loop; driveLengthOffsetsFt in refineConfig; fix generateCandidates to filter by reqs.driveways count | ✅ Done |
+| 3 | Replace accessQuality with drivewayConnected + drivewayLength; thread road = null through score() + all call sites; 4 profile knobs; maxScore 4.55 → 5.25 | ✅ Done |
+
 ## Road Detection (`js/road.js`) — Phases 1–2 COMPLETE
 
 New `js/road.js`: exports `roadConfig` (all knobs) and `async detectRoad(parcelLatLng, centroid) → roadResult | null`. Never throws.
@@ -1136,33 +1190,32 @@ Wired in `main.js`:
 
 ## Optimizer feasibility gate fix (`js/optimize.js`)
 
-**Problem:** The gate `elements.some(e => !e.feasible)` rejected any candidate where a driveway or basin failed. On irregular/large parcels with diagonal edges (e.g., a parcel bordered by a diagonal highway), the driveway consistently fails because `frontageV` returns the global min-v (easternmost parcel vertex) but the building lands at a different u-position where the actual parcel boundary is less east — so the driveway rectangle falls entirely outside the parcel. This caused "No feasible layouts found (288 candidates tried)" for all 288 candidates.
+**Problem:** The gate `elements.some(e => !e.feasible)` rejected any candidate where a driveway or basin failed. On irregular/large parcels with diagonal edges, the driveway consistently failed because `frontageV` returned the global min-v rather than the actual parcel boundary at the driveway's u-position — driveway rectangle fell entirely outside the parcel. This caused "No feasible layouts found (288 candidates tried)" for all 288 candidates.
 
-**Fix:** Added `isCandidateViable(elements)` in `optimize.js` (used in all 4 gate checks: Phase 1 grid, AI seeds loop, Phase 2 refinement, `scoreAiSeeds`):
+**Fix (current):** `isCandidateViable(elements)` — only building failures disqualify a candidate. Now only requires ≥ 1 building to be feasible (not all buildings). Parking/driveway/basin failures reduce score rather than disqualifying.
 ```javascript
 function isCandidateViable(elements) {
   const buildings = elements.filter(e => e.type === 'building');
-  return buildings.length > 0 && buildings.every(e => e.feasible);
+  return buildings.some(e => e.feasible);
 }
 ```
-Only building failures disqualify a candidate. Parking/driveway/basin failures reduce the score via `parkingMet` / `basinAccuracy` terms (same behavior as the Solve path which warns rather than blocks).
+Used in all 4 gate checks: Phase 1 grid, AI seeds loop, Phase 2 refinement, `scoreAiSeeds`. The driveway geometry root cause was also fixed separately via `frontageVAtU`.
 
 ~~**Known remaining issue:** On diagonal-edged parcels, driveways still fail (warning appears) but the optimizer now returns scored layouts instead of zero results. The root geometry issue — `frontageV` uses the global min-v rather than the actual parcel boundary at the driveway's u-position — is a deeper fix deferred to a future session.~~
 
 **Fixed (current session):** See bug fix table below.
 
-## Bug fixes (current session, uncommitted)
-
-All fixes below are on disk but not yet committed.
+## Bug fixes (all committed)
 
 | Fix | File | What changed |
 |-----|------|-------------|
-| Driveway geometry on diagonal-edge parcels | arrange.js | Added `frontageVAtU(parcelFt, frame, uCenter)` — scans parcel edges to find the actual boundary v at the driveway's u-position. `realizeDriveway` now uses this instead of global `frontageV`. On slanted/diagonal parcels the global min-v only holds at one vertex; using it elsewhere caused the driveway rect to start outside the parcel → "No overlap with parcel". |
-| Parking stall count underreported | arrange.js | Fixed reverse-calc: was `actualSqFt / 325`, now `actualSqFt / (9 × (stallDepthFt + aisleFt/2))` = `actualSqFt / 270`. Matches the forward sizing formula and shows ~17% more stalls for the same clipped area. |
-| Parking overflows parcel boundary | arrange.js | `realizeParking` now accepts `parcelTurf` (forwarded from `realizeElement`). After `turf.intersect(freeForPark, parkRect)`, adds a second clip: `turf.intersect(parcelTurf, rawClipped)`. The `clearRing` (30ft building buffer minus footprint) can extend past the parcel edge on close-to-road placements; without this second clip the parking polygon escapes the lot. |
-| Driveway renders as a hair-thin line | arrange.js | Changed minimum driveway depth from `vFront + 1` to `vFront + halfWidth * 2` (= driveway width, typically 24 ft). When parking's pre-clip `localBounds.vMin` is outside the parcel, `frontageVAtU` correctly computes the real parcel edge, but the old `+1` clamp left only a 1 ft deep rectangle. The new minimum guarantees a square-minimum (24×24 ft) driveway footprint even when parking abuts the road boundary. |
-| Scorer blind to missing driveways | score.js + PROFILES | Added `drivewayPresent: 0.4` weight: raw = `1` if any driveway placed, `0` if none. Previously a layout with no driveway scored the same as perfect access on `accessQuality` (0 contribution). New retail maxScore = **4.55** (was 4.15). |
-| `drivewayPresent` label in score panel | main.js | Added `'Driveway present'` to `TERM_LABELS`. |
+| Driveway geometry on diagonal-edge parcels | arrange.js | Added `frontageVAtU(parcelFt, frame, uCenter)` — scans parcel edges to find the actual boundary v at the driveway's u-position. `realizeDriveway` uses this instead of global `frontageV`. Global min-v only holds at one parcel vertex; elsewhere on slanted parcels the driveway rect started outside the parcel → "No overlap with parcel". |
+| Parking stall count underreported | arrange.js | Fixed reverse-calc: was `actualSqFt / 325`, now `actualSqFt / (9 × (stallDepthFt + aisleFt/2))` = `actualSqFt / 270`. Matches forward sizing formula. |
+| Parking overflows parcel boundary | arrange.js | `realizeParking` second-clips to `parcelTurf` after clipping to `freeForPark`. The `clearRing` (30ft buffer minus footprint) can extend past parcel edge on close-to-road placements. |
+| 2-driveway search ignored user request | optimize.js | `generateCandidates` now pre-filters `drivewaySets` to entries whose `.length === reqs.driveways`. Previously all 4 combos ran regardless, so 3 single-driveway candidates competed against 1 double-driveway candidate. |
+| Driveway renders as hair-thin line | arrange.js | Minimum vTarget changed from `vFront + 1` to `vFront + halfWidth*2` (typically 24 ft). `frontageVAtU` correctly computes real parcel edge, but old +1 left a 1 ft deep rectangle when parking abuts road boundary. |
+| Scorer blind to missing driveways | score.js | Added `drivewayPresent: 0.4` weight. Previously a layout with no driveway scored 0 on `accessQuality` regardless. |
+| accessQuality replaced | score.js | Retired `accessQuality: -0.25` (crude area-ratio penalty). Replaced with `drivewayConnected: 0.4` + `drivewayLength: 0.3`. maxScore 4.55 → 5.25. |
 
 ## Known remaining bug (NOT YET FIXED) — JSTS "Unable to complete output ring" on Solve path
 
@@ -1193,10 +1246,10 @@ Best applied inside `realizeArrangement` itself (in arrange.js) so both call sit
 
 ## Pending tasks
 
-- **NEXT: Fix JSTS "Unable to complete output ring" on Solve path** — apply turf monkey-patch inside `realizeArrangement` in arrange.js (see details above)
-- **Commit all session changes** — road.js Phase 2, main.js, optimize.js (isCandidateViable), arrange.js (frontageVAtU + stall fix + parking parcelTurf clip + driveway min depth), score.js (drivewayPresent)
-- **Test AI badges**: Run Optimize, check DevTools console. 3 Gemini requests fire concurrently. Status bar shows `· N AI` if any AI seeds passed the gate.
-- **Remaining stall shortfall on diagonal parcels**: parking area is legitimately clipped when the parcel's road-facing edge is not a straight line. The optimizer penalises this via `parkingMet` + `drivewayPresent`, so it prefers layouts where more stalls fit — but the available space is ultimately constrained by the parcel shape.
+- **NEXT: Fix JSTS "Unable to complete output ring" on Solve path** — apply turf monkey-patch inside `realizeArrangement` in arrange.js (see "Known remaining bug" section above). Pattern: save originals, replace with null-returning wrappers, restore in finally block.
+- **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set. Eyeball real outputs after testing with various parcels. All 4 constants are profile knobs (`drivewayLengthLo/Hi/Falloff`, `drivewayConnectThreshFt`) — no code change needed to tune.
+- **Deploy / key security** — backend proxy for Gemini key; HTTP-referrer restriction on Maps key.
+- **Remaining stall shortfall on diagonal parcels**: parking area is legitimately clipped when the parcel's road-facing edge is not a straight line. Optimizer penalizes via `parkingMet`, so it prefers layouts with more stalls — but available space is constrained by parcel shape.
 
 ---
 
@@ -1211,27 +1264,15 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 
 ## Git log (recent)
 ```
-bc0ecbf Move project docs to markdow/ subdirectory
-77ebaee Add AI Schema-Proposer Phase 2 + Road Detection Phase 1
-6f03ade Fix maxScore display bug + update SUMMARY for AI Schema-Proposer Phase 1
-a0fde25 Add AI schema-proposer Phase 1: proposeArrangements + aiSeeds pipeline
-b6290ef Add schema optimizer Phases 2–3: local refinement + Web Worker UI
-6767a1f Fix optimizer crash on Turf geometry errors in individual candidates
-b520168 Add schema optimizer Phase 1: arrangement search via realizeArrangement
+(current)  Phase 3 driveway scoring: drivewayConnected + drivewayLength, retire accessQuality, thread road
+(previous) WIP: diagonal parcel driveway fixes + road/score/optimize updates (local commit before pull)
+23a49ee   Merge origin/main: combine diagonal-parcel driveway fix + length knobs + isCandidateViable
+1a12adc   driveway (remote: driveway length knob system)
+bc0ecbf   Move project docs to markdow/ subdirectory
+77ebaee   Add AI Schema-Proposer Phase 2 + Road Detection Phase 1
+6f03ade   Fix maxScore display bug + update SUMMARY for AI Schema-Proposer Phase 1
+a0fde25   Add AI schema-proposer Phase 1: proposeArrangements + aiSeeds pipeline
+b6290ef   Add schema optimizer Phases 2–3: local refinement + Web Worker UI
 ```
 
-**Uncommitted changes on disk (git status: M):**
-- `js/main.js` — frontage reset on boundary close; corner-lot alt-road status; `drivewayPresent` in TERM_LABELS
-- `js/optimize.js` — `isCandidateViable` gate (only building failures disqualify); used in all 4 gate checks
-- `js/road.js` — Phase 2: `candidates[]` array, cardinal dedup, nearest-per-direction
-- `js/arrange.js` — `frontageVAtU`; parking `parcelTurf` clip; driveway min depth; stall count formula (270)
-- `js/score.js` — `drivewayPresent: 0.4` term + computation
-- `markdow/SUMMARY.md` — this file
-189c475 Add frontage UI, fix S/N parking on slanted/tilted parcels
-10e6584 Update SUMMARY.md with full session context
-35eafbe Fix E/W parking stall loss on slanted boundaries via multi-lat edge sampling
-30b322f Fix E/W parking placement on slanted parcels
-781f786 Fix E/W driveway: use parking cross-section as inner boundary, not bbox
-96d9b13 Wire aiHints.frontage through to solver in onSolve
-165e183 Add road frontage parameter (steps 1-3 + AI parsing)
-```
+**All changes are committed. Nothing uncommitted on disk.**

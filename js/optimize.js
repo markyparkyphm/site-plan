@@ -13,13 +13,13 @@ const BASIN_CORNERS = ['SW', 'SE', 'NW', 'NE'];
 
 // frontage is passed in already resolved ('N'|'S'|'E'|'W') and is held FIXED.
 // It is NEVER a search dimension — see OPTIMIZER_TASK.md for the hard rule.
-export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage) {
+export function optimizeLayout(parcelLatLng, reqs, baseHints, profile, parcelFt, parcelAreaSqFt, frontage, road = null) {
   const candidates = [];
 
   for (const basinCorner of BASIN_CORNERS) {
     const hints = { ...baseHints, basinCorner, frontage };
     const layout = solveLayout(parcelLatLng, reqs, hints);
-    const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+    const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
     candidates.push({
       params:    { basinCorner },
       layout,
@@ -169,11 +169,15 @@ function* generateCandidates(reqs, frontage, searchConfig) {
     maxCandidates,
   } = searchConfig;
 
+  const reqDwCount = reqs.driveways ?? 1;
+  const filteredDrivewaySets = drivewaySets.filter(s => s.length === reqDwCount);
+  const activeDrivewaySets = filteredDrivewaySets.length > 0 ? filteredDrivewaySets : drivewaySets;
+
   let count = 0;
   for (const layout of layouts) {
     for (const gapFt of gapFts) {
       for (const parkingFaces of parkingFacesSets) {
-        for (const driveways of drivewaySets) {
+        for (const driveways of activeDrivewaySets) {
           for (const basinCorner of basinCorners) {
             for (const setbackFt of setbackFts) {
               for (const alignU of alignUs) {
@@ -221,7 +225,7 @@ function alignUToFeet(alignU, parcelFt, frame, faceFt, setbackFt) {
 // Phase 2: try a fine setbackFt grid and numeric alignU offsets around each
 // Phase 1 winner.  Returns { candidates, tried } so the caller can account for
 // total attempted candidates across both phases.
-function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt) {
+function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt, road = null) {
   const { refineConfig, setbackFt: phase1Setbacks } = profile.searchConfig;
   if (!refineConfig || topKWinners.length === 0) return { candidates: [], tried: 0 };
 
@@ -274,7 +278,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
           if (!isCandidateViable(elements)) continue;
 
           const layout = layoutFromElements(elements);
-          const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+          const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
           candidates.push({
             schema,
             layout,
@@ -314,7 +318,7 @@ export function knobSig(k) {
 // Score AI knob-sets on the main thread with the same turf monkey-patch used inside the
 // worker. Deduplicates internally. Returns feasible candidate objects tagged source:'ai'.
 // Called from main.js after the worker finishes, to merge AI seeds into the ranked list.
-export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile) {
+export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road = null) {
   if (!seeds.length) return [];
 
   const parcelFt       = latLngToFeet(parcelLngLat);
@@ -342,7 +346,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile) {
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
-      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       candidates.push({
         schema, layout,
         total:    result.total,
@@ -368,7 +372,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile) {
 // aiSeeds: pre-validated knob-sets from proposeArrangements (main thread).
 //   Scored first, deduped against Phase 1 grid via knobSig. Pass [] to get
 //   a run identical to today's deterministic search.
-export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = []) {
+export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onProgress = null, aiSeeds = [], road = null) {
   const searchConfig   = profile.searchConfig;
   const parcelFt       = latLngToFeet(parcelLngLat);
   const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
@@ -420,7 +424,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
-      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       const candidate = {
         schema, layout,
         total:    result.total,
@@ -454,7 +458,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       if (!isCandidateViable(elements)) continue;
 
       const layout = layoutFromElements(elements);
-      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
+      const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
 
       const candidate = {
         schema,   // includes _knobs for UI inspection
@@ -475,7 +479,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       ranked.sort((a, b) => b.total - a.total);
       const topK = searchConfig.topK ?? 4;
       const { candidates: p2candidates, tried: p2tried } = refineArrangement(
-        ranked.slice(0, topK), parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt
+        ranked.slice(0, topK), parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt, road
       );
       totalTried += p2tried;
       for (const c of p2candidates) {

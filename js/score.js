@@ -6,7 +6,8 @@ export const PROFILES = {
     parkingInFront:  0.7,
     roadVisibility:  0.6,
     coverageTarget:  0.5,
-    accessQuality:  -0.25,
+    drivewayConnected: 0.4,
+    drivewayLength:    0.3,
     drivewayPresent: 0.4,
     basinAccuracy:   0.3,
     compactness:     0.15,
@@ -19,7 +20,11 @@ export const PROFILES = {
     stallDepthFt:         18,
     aisleFt:              24,
     drivewayWidthFt:      24,
-    defaultDriveLengthFt: null,   // null → derive functional length (span to served element's far edge)
+    defaultDriveLengthFt:    null,  // null → derive functional length (span to served element's far edge)
+    drivewayConnectThreshFt: 30,
+    drivewayLengthLo:        0.6,
+    drivewayLengthHi:        1.0,
+    drivewayLengthFalloff:   0.5,
     gapFt:                10,
     // Schema-optimizer search config — value-sets and grids for optimizeArrangement.
     // All knobs live here, not in optimize.js, so profiles control the search space.
@@ -71,7 +76,7 @@ function plateau(v, lo, hi, falloff) {
   return clamp01(1 - (v - hi) / falloff);
 }
 
-export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile) {
+export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road = null) {
   const W = profile;
   const terms = {};
   const add = (name, raw) => {
@@ -109,8 +114,38 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
   const footprintSqFt = layout.buildings.reduce((s, bl) => s + bl.length_ft * bl.width_ft, 0);
   add('coverageTarget', plateau(footprintSqFt / parcelAreaSqFt, 0.20, 0.25, 0.20));
 
-  const dwSqFt = layout.driveways.reduce((s, d) => s + turf.area(d) * 10.7639, 0);
-  add('accessQuality', clamp01((dwSqFt / parcelAreaSqFt) / 0.05));
+  // --- drivewayConnected (neutral when no road detected — Decision B from spec) ---
+  const dwCount = layout.driveways.length;
+  if (!road?.line || dwCount === 0) {
+    add('drivewayConnected', 1);
+  } else {
+    const connectThreshFt = profile.drivewayConnectThreshFt ?? 30;
+    const roadBuf = turf.buffer(road.line, connectThreshFt, { units: 'feet' });
+    let connected = 0;
+    for (const d of layout.driveways) {
+      if (roadBuf && turf.booleanIntersects(d, roadBuf)) connected++;
+    }
+    add('drivewayConnected', clamp01(connected / dwCount));
+  }
+
+  // --- drivewayLength: reward lanes that span the parking depth, penalize gross overshoot ---
+  if (dwCount === 0 || layout.buildings.length === 0) {
+    add('drivewayLength', 1);
+  } else {
+    const meanBldgDepth = layout.buildings.reduce((s, bl) =>
+        s + depthFromFront({ x: bl.center_x_ft, y: bl.center_y_ft }, frontage, b), 0)
+      / layout.buildings.length;
+    const faceDepthFt = Math.max(40, meanBldgDepth);
+    const lo      = profile.drivewayLengthLo       ?? 0.6;
+    const hi      = profile.drivewayLengthHi       ?? 1.0;
+    const falloff = profile.drivewayLengthFalloff   ?? 0.5;
+    const raws = layout.driveways.map(d => {
+      const L = d.properties?.lengthFt ?? 0;
+      return plateau(L / faceDepthFt, lo, hi, falloff);
+    });
+    add('drivewayLength', raws.reduce((s, r) => s + r, 0) / raws.length);
+  }
+
   add('drivewayPresent', layout.driveways.length > 0 ? 1 : 0);
 
   const target = (reqs.pondSqFt ?? (reqs.pondPct / 100) * parcelAreaSqFt) || 0;

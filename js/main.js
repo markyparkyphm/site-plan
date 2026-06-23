@@ -23,8 +23,9 @@ const TERM_LABELS = {
   parkingInFront:  'Parking in front',
   roadVisibility:  'Road visibility',
   coverageTarget:  'Coverage',
-  accessQuality:   'Access (penalty)',
-  drivewayPresent: 'Driveway present',
+  drivewayConnected: 'Driveway connected',
+  drivewayLength:    'Driveway length',
+  drivewayPresent:   'Driveway present',
   basinAccuracy:   'Basin accuracy',
   compactness:     'Compactness',
   openSpace:       'Open space',
@@ -472,7 +473,7 @@ function renderLayout(layout, reqs, isDeterministic, frontageHint) {
 
   // Score
   const resolvedFrontage = ['N','S','E','W'].includes(frontageHint) ? frontageHint : 'S';
-  const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail);
+  const scoreResult = score(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail, detectedRoad);
   document.getElementById('score-total').textContent =
     `${scoreResult.total.toFixed(2)} / ${scoreResult.maxScore.toFixed(2)}`;
   const breakdown = document.getElementById('score-breakdown');
@@ -581,7 +582,7 @@ async function onOptimize() {
         const aiSeeds      = await geminiPromise;
         document.getElementById('btn-optimize').disabled = false;
 
-        const aiCandidates = scoreAiSeeds(aiSeeds, parcelLatLng, reqs, frontage, PROFILES.retail);
+        const aiCandidates = scoreAiSeeds(aiSeeds, parcelLatLng, reqs, frontage, PROFILES.retail, detectedRoad);
 
         // Merge: add AI candidates whose knob signature doesn't duplicate a grid result.
         const gridSigs = new Set(gridRanked.map(c => knobSig(c.schema._knobs)));
@@ -619,7 +620,7 @@ async function onOptimize() {
     };
 
     // Worker runs the grid search only (aiSeeds: [] — AI seeds scored on main thread).
-    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds: [] });
+    optimizerWorker.postMessage({ parcelLatLng, reqs, frontage, profile: PROFILES.retail, aiSeeds: [], road: detectedRoad });
     return;
   }
 
