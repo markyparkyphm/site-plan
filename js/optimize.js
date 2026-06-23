@@ -254,7 +254,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
           ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
         } catch (_) { continue; }
 
-        if (elements.some(e => !e.feasible)) continue;
+        if (!isCandidateViable(elements)) continue;
 
         const layout = layoutFromElements(elements);
         const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
@@ -272,6 +272,17 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
   }
 
   return { candidates, tried };
+}
+
+// A candidate is viable when at least one building was placed. Partial placements score
+// lower via buildingsPlaced (weight 1.0) so the optimizer naturally prefers full placements.
+// Parking / driveway / basin failures similarly reduce score rather than disqualifying.
+// The old "all buildings must be feasible" rule was too strict on tight parcels where
+// the multi-row fallback may be unable to fit every building — those candidates should
+// still appear in the ranked list rather than causing "No feasible layouts found".
+function isCandidateViable(elements) {
+  const buildings = elements.filter(e => e.type === 'building');
+  return buildings.some(e => e.feasible);
 }
 
 // Stable string key for a knob-set — used to deduplicate AI seeds against grid candidates.
@@ -310,7 +321,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile) {
       try {
         ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
       } catch (_) { continue; }
-      if (elements.some(e => !e.feasible)) continue;
+      if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
       candidates.push({
@@ -388,7 +399,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       try {
         ({ elements } = realizeArrangement(schema, parcelLngLat, profile));
       } catch (_) { continue; }
-      if (elements.some(e => !e.feasible)) continue;
+      if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);
       const candidate = {
@@ -421,7 +432,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
 
       // Feasibility gate: disqualify the candidate if any element failed.
       // All elements in a generated schema are required — partial failure = invalid plan.
-      if (elements.some(e => !e.feasible)) continue;
+      if (!isCandidateViable(elements)) continue;
 
       const layout = layoutFromElements(elements);
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile);

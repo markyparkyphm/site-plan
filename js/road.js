@@ -61,7 +61,7 @@ export async function detectRoad(parcelLatLng, centroid) {
     }
     if (roads.length === 0) return null;
 
-    // 4. Pick the nearest most-parallel road.
+    // 4. Collect all survivors that pass both gates; nearest wins.
     const centroidPt = turf.point([centroid.lng, centroid.lat]);
 
     // Parcel edges as [a, b] coordinate pairs for the parallelism gate.
@@ -71,10 +71,10 @@ export async function detectRoad(parcelLatLng, centroid) {
     // Pre-build parcel vertex points once for the distance gate.
     const parcelPts = parcelLatLng.map(p => turf.point([p.lng, p.lat]));
 
-    let best = null;
+    const survivors = [];
     for (const road of roads) {
-      // Cardinal snap uses centroid → road (spec). Distance gate uses nearest parcel
-      // vertex → road so large parcels don't falsely exceed maxDistFt from the centroid.
+      // Distance gate uses nearest parcel vertex → road so large parcels don't falsely
+      // exceed maxDistFt from the centroid alone.
       const nearest = turf.nearestPointOnLine(road, centroidPt, { units: 'feet' });
       const edgeDist = Math.min(...parcelPts.map(
         pt => turf.nearestPointOnLine(road, pt, { units: 'feet' }).properties.dist,
@@ -111,25 +111,51 @@ export async function detectRoad(parcelLatLng, centroid) {
       if (diff > 90) diff = 180 - diff;
       if (diff > roadConfig.maxBearingDiffDeg) continue;
 
-      const centroidDistFt = nearest.properties.dist;
-      if (!best || centroidDistFt < best.distanceFt) {
-        best = { road, nearest, distanceFt: centroidDistFt, bearingDiffDeg: diff };
+      // 5. Snap centroid → nearest-point bearing to the nearest cardinal (N/E/S/W).
+      const rawBearing = turf.bearing(centroidPt, nearest);
+      const normalized = ((rawBearing % 360) + 360) % 360;
+      const cardinal   = ['N', 'E', 'S', 'W'][Math.round(normalized / 90) % 4];
+
+      survivors.push({
+        cardinal,
+        road,
+        nearest,
+        distanceFt:     nearest.properties.dist,
+        bearingDiffDeg: diff,
+      });
+    }
+    if (survivors.length === 0) return null;
+
+    // Deduplicate by cardinal — keep only the nearest survivor per direction.
+    // A single road (e.g. N Eldridge Pkwy) can produce many OSM way segments that all
+    // pass the gates; collapsing by cardinal gives one entry per parcel edge.
+    const byCardinal = new Map();
+    for (const s of survivors) {
+      if (!byCardinal.has(s.cardinal) || s.distanceFt < byCardinal.get(s.cardinal).distanceFt) {
+        byCardinal.set(s.cardinal, s);
       }
     }
-    if (!best) return null;
+    const deduped = [...byCardinal.values()].sort((a, b) => a.distanceFt - b.distanceFt);
+    const best = deduped[0];
 
-    // 5. Snap bearing from centroid → nearest point to the nearest cardinal (N/E/S/W).
-    const rawBearing = turf.bearing(centroidPt, best.nearest);
-    const normalized = ((rawBearing % 360) + 360) % 360;
-    const cardinal   = ['N', 'E', 'S', 'W'][Math.round(normalized / 90) % 4];
+    // Build the stable §5 candidate list — one entry per cardinal direction.
+    const candidates = deduped.map(s => ({
+      cardinal:       s.cardinal,
+      line:           s.road,
+      nearestPt:      s.nearest,
+      distanceFt:     s.distanceFt,
+      bearingDiffDeg: s.bearingDiffDeg,
+      source:         'overpass',
+    }));
 
     return {
-      cardinal:      cardinal,
-      line:          best.road,
-      nearestPt:     best.nearest,
-      distanceFt:    best.distanceFt,
+      cardinal:       best.cardinal,
+      line:           best.road,
+      nearestPt:      best.nearest,
+      distanceFt:     best.distanceFt,
       bearingDiffDeg: best.bearingDiffDeg,
-      source:        'overpass',
+      source:         'overpass',
+      candidates,     // all survivors sorted by distance; [0] is the winner
     };
   } catch (e) {
     console.warn('[road.js] detectRoad failed:', e);

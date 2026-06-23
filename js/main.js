@@ -24,6 +24,7 @@ const TERM_LABELS = {
   roadVisibility:  'Road visibility',
   coverageTarget:  'Coverage',
   accessQuality:   'Access (penalty)',
+  drivewayPresent: 'Driveway present',
   basinAccuracy:   'Basin accuracy',
   compactness:     'Compactness',
   openSpace:       'Open space',
@@ -91,6 +92,10 @@ function onBoundaryClosed(pts) {
   parcelFt = latLngToFeet(pts);
   centroid = computeCentroid(pts);
 
+  // Reset frontage so detection always pre-fills for this boundary.
+  // Without this, a stale N/S/E/W from a previous parcel would block the pre-fill.
+  document.getElementById('input-frontage').value = 'auto';
+
   const acres = sqFtToAcres(polygonAreaSqFt(parcelFt));
   document.getElementById('btn-use-boundary').disabled = false;
   document.getElementById('acreage').textContent = `${acres.toFixed(2)} acres`;
@@ -125,8 +130,11 @@ function onBoundaryClosed(pts) {
         strokeOpacity: 0.9,
       });
     }
+    const altNote = result.candidates.length > 1
+      ? ` · also: ${result.candidates.slice(1).map(c => `${c.cardinal} (${Math.round(c.distanceFt)} ft)`).join(', ')}`
+      : '';
     roadStatusEl.textContent =
-      `Detected: ${result.cardinal} side (${Math.round(result.distanceFt)} ft away)`;
+      `Detected: ${result.cardinal} side (${Math.round(result.distanceFt)} ft away)${altNote}`;
   });
 }
 

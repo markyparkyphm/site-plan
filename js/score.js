@@ -7,6 +7,7 @@ export const PROFILES = {
     roadVisibility:  0.6,
     coverageTarget:  0.5,
     accessQuality:  -0.25,
+    drivewayPresent: 0.4,
     basinAccuracy:   0.3,
     compactness:     0.15,
     openSpace:       0.0,
@@ -108,6 +109,7 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
 
   const dwSqFt = layout.driveways.reduce((s, d) => s + turf.area(d) * 10.7639, 0);
   add('accessQuality', clamp01((dwSqFt / parcelAreaSqFt) / 0.05));
+  add('drivewayPresent', layout.driveways.length > 0 ? 1 : 0);
 
   const target = (reqs.pondSqFt ?? (reqs.pondPct / 100) * parcelAreaSqFt) || 0;
   if (target > 0) {

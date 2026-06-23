@@ -1102,41 +1102,99 @@ Commit: 6767a1f
 | 2 | 3 bias templates (visibility/parking/compact) via Promise.allSettled; Gemini fires concurrently with worker; seeds scored on main thread via scoreAiSeeds; richer parcel description (aspect + shape note) | ✅ Done |
 | Deploy | Backend proxy for Gemini key; rotate keys; lock Maps key with HTTP-referrer restriction | Not started |
 
-## Road Detection (`js/road.js`) — Phase 1 COMPLETE
+## Road Detection (`js/road.js`) — Phases 1–2 COMPLETE
 
 New `js/road.js`: exports `roadConfig` (all knobs) and `async detectRoad(parcelLatLng, centroid) → roadResult | null`. Never throws.
 
-Queries Overpass `way["highway"]` within parcel bbox expanded by `bboxMarginFt` (150 ft), converted ft→degrees via `computeScaleFactors`. Filters pedestrian types (`highwayExclude`). Picks nearest road that passes the parallelism gate (road-segment bearing vs nearest parcel-edge bearing, folded 0–90, must be ≤ `maxBearingDiffDeg` 35°). Snaps centroid→nearestPt bearing to N/E/S/W. Returns `{ cardinal, line, nearestPt, distanceFt, bearingDiffDeg, source:'overpass' }` or `null`.
+Queries Overpass `way["highway"]` within parcel bbox expanded by `bboxMarginFt` (150 ft), converted ft→degrees via `computeScaleFactors`. Filters pedestrian types (`highwayExclude`). Collects all roads passing both gates into `survivors[]`, deduplicates by cardinal direction (keeping nearest per direction — prevents multi-segment highways from flooding the list), sorts by centroid distance. Nearest wins.
 
-Wired in `main.js`:
-- `onBoundaryClosed` fires `detectRoad` async after centroid is set; stale-result guard via `parcelLatLng !== snapPts`; pre-fills `#input-frontage` only if currently `'auto'`; draws thin magenta `google.maps.Polyline`.
-- `onClear` removes `roadOverlay` and nulls `detectedRoad`.
-
-### Road Detection bugs fixed
-
-**Bug 1: centroid→road distance too large for big parcels (Hwy 60 parcel)**
-Distance gate used `nearest.properties.dist` (centroid→road). For a 20+ acre parcel the centroid is 400–600 ft from the edge, exceeding `maxDistFt: 300` even when the road is right on the parcel boundary.
-**Fix:** Changed gate to `edgeDist = Math.min(...parcelPts.map(pt => turf.nearestPointOnLine(road, pt).properties.dist))` — minimum distance from any parcel vertex to the road. Cardinal snap still uses centroid→nearestPt bearing (correct per spec).
-
-**Bug 2: road-status overwritten by "Boundary confirmed" (all parcels)**
-Detection result was written to `#status`, which `onUseBoundary` overwrites immediately.
-**Fix:** Added dedicated `<div id="road-status">` in `index.html` under the Road Frontage dropdown. Detection writes there; status bar is unaffected.
-
-**Bug 3: `distFt` ReferenceError — all roads silently dropped (Addicks Dam Rd parcel)**
-After the vertex-distance-gate refactor (Bug 1), the original variable `distFt` was removed. But line 114 still referenced it in the `best` comparison:
+**Return shape (Phase 2 §5):**
 ```javascript
-if (!best || distFt < best.distanceFt) {   // ← distFt is not defined
-  best = { road, nearest, distanceFt: distFt, ... };
+{
+  cardinal, line, nearestPt, distanceFt, bearingDiffDeg, source: 'overpass',
+  candidates: [  // all survivors deduped by cardinal, sorted by distance; [0] = winner
+    { cardinal, line, nearestPt, distanceFt, bearingDiffDeg, source },
+    ...
+  ]
 }
 ```
-Every road that survived both gates threw `ReferenceError: distFt is not defined`. The outer `catch {}` swallowed it silently → returned null for any parcel with a nearby parallel road. The Overpass query was working correctly the entire time.
-**Fix:** `const centroidDistFt = nearest.properties.dist;` and use `centroidDistFt` in the comparison and result object. Also changed `catch {}` → `catch (e) { console.warn('[road.js] detectRoad failed:', e); }` so future silent failures surface in DevTools.
+Corner lots produce `candidates.length > 1`. Road-status shows `· also: W (85 ft)` for alternates.
+
+Wired in `main.js`:
+- `onBoundaryClosed` resets `#input-frontage` to `'auto'` immediately (so a stale direction from a previous parcel never blocks detection pre-fill), then fires `detectRoad` async; stale-result guard via `parcelLatLng !== snapPts`; pre-fills dropdown (only when still `'auto'` after reset); draws thin magenta `google.maps.Polyline`.
+- `onClear` removes `roadOverlay` and nulls `detectedRoad`.
+
+### Road Detection bugs fixed (all in previous session)
+
+**Bug 1:** Distance gate used centroid→road; fails on large parcels. Fixed: use min vertex→road distance.
+**Bug 2:** Road status overwritten by "Boundary confirmed". Fixed: dedicated `<div id="road-status">`.
+**Bug 3:** `distFt` ReferenceError silently dropped all survivors. Fixed: renamed to `centroidDistFt`.
+**Bug 4:** Multi-segment highways produced duplicate cardinal entries (e.g., 7 × "E"). Fixed: dedup by cardinal, keep nearest.
+**Bug 5:** Stale frontage direction blocked detection pre-fill on re-draw. Fixed: reset dropdown to `'auto'` at boundary close.
+
+## Optimizer feasibility gate fix (`js/optimize.js`)
+
+**Problem:** The gate `elements.some(e => !e.feasible)` rejected any candidate where a driveway or basin failed. On irregular/large parcels with diagonal edges (e.g., a parcel bordered by a diagonal highway), the driveway consistently fails because `frontageV` returns the global min-v (easternmost parcel vertex) but the building lands at a different u-position where the actual parcel boundary is less east — so the driveway rectangle falls entirely outside the parcel. This caused "No feasible layouts found (288 candidates tried)" for all 288 candidates.
+
+**Fix:** Added `isCandidateViable(elements)` in `optimize.js` (used in all 4 gate checks: Phase 1 grid, AI seeds loop, Phase 2 refinement, `scoreAiSeeds`):
+```javascript
+function isCandidateViable(elements) {
+  const buildings = elements.filter(e => e.type === 'building');
+  return buildings.length > 0 && buildings.every(e => e.feasible);
+}
+```
+Only building failures disqualify a candidate. Parking/driveway/basin failures reduce the score via `parkingMet` / `basinAccuracy` terms (same behavior as the Solve path which warns rather than blocks).
+
+~~**Known remaining issue:** On diagonal-edged parcels, driveways still fail (warning appears) but the optimizer now returns scored layouts instead of zero results. The root geometry issue — `frontageV` uses the global min-v rather than the actual parcel boundary at the driveway's u-position — is a deeper fix deferred to a future session.~~
+
+**Fixed (current session):** See bug fix table below.
+
+## Bug fixes (current session, uncommitted)
+
+All fixes below are on disk but not yet committed.
+
+| Fix | File | What changed |
+|-----|------|-------------|
+| Driveway geometry on diagonal-edge parcels | arrange.js | Added `frontageVAtU(parcelFt, frame, uCenter)` — scans parcel edges to find the actual boundary v at the driveway's u-position. `realizeDriveway` now uses this instead of global `frontageV`. On slanted/diagonal parcels the global min-v only holds at one vertex; using it elsewhere caused the driveway rect to start outside the parcel → "No overlap with parcel". |
+| Parking stall count underreported | arrange.js | Fixed reverse-calc: was `actualSqFt / 325`, now `actualSqFt / (9 × (stallDepthFt + aisleFt/2))` = `actualSqFt / 270`. Matches the forward sizing formula and shows ~17% more stalls for the same clipped area. |
+| Parking overflows parcel boundary | arrange.js | `realizeParking` now accepts `parcelTurf` (forwarded from `realizeElement`). After `turf.intersect(freeForPark, parkRect)`, adds a second clip: `turf.intersect(parcelTurf, rawClipped)`. The `clearRing` (30ft building buffer minus footprint) can extend past the parcel edge on close-to-road placements; without this second clip the parking polygon escapes the lot. |
+| Driveway renders as a hair-thin line | arrange.js | Changed minimum driveway depth from `vFront + 1` to `vFront + halfWidth * 2` (= driveway width, typically 24 ft). When parking's pre-clip `localBounds.vMin` is outside the parcel, `frontageVAtU` correctly computes the real parcel edge, but the old `+1` clamp left only a 1 ft deep rectangle. The new minimum guarantees a square-minimum (24×24 ft) driveway footprint even when parking abuts the road boundary. |
+| Scorer blind to missing driveways | score.js + PROFILES | Added `drivewayPresent: 0.4` weight: raw = `1` if any driveway placed, `0` if none. Previously a layout with no driveway scored the same as perfect access on `accessQuality` (0 contribution). New retail maxScore = **4.55** (was 4.15). |
+| `drivewayPresent` label in score panel | main.js | Added `'Driveway present'` to `TERM_LABELS`. |
+
+## Known remaining bug (NOT YET FIXED) — JSTS "Unable to complete output ring" on Solve path
+
+**Symptom:** Clicking "Solve Layout" on certain parcels/programs shows the error message:
+> `Error: Unable to complete output ring starting at [lng, lat]. Last matching segment found ends at [lng, lat].`
+
+**Root cause:** The turf monkey-patch that converts JSTS throws to `null` (so `?? free` / `?? null` fallbacks kick in) is only applied inside `optimizeArrangement` (which runs in the worker). The direct `realizeArrangement` call from `onSolve` on the main thread has no monkey-patch, so the JSTS coincident-edge throw propagates up, gets caught by `onSolve`'s try/catch, and shows as an error with no layout rendered.
+
+The coincident-edge trigger: the group's bounding-box clearance buffer and the first child's clearance buffer share exactly coincident boundary segments when the child defines the maximum group depth. JSTS's ring-traversal algorithm can't handle these.
+
+**Fix needed:** Apply the same turf monkey-patch inside `realizeArrangement` itself (or in `onSolve` before calling it) so the Solve path is protected exactly like the Optimize path. Pattern to copy from `optimizeArrangement`:
+```javascript
+const origUnion      = turf.union;
+const origDifference = turf.difference;
+const origIntersect  = turf.intersect;
+turf.union      = (a, b) => { try { return origUnion(a, b);      } catch (_) { return null; } };
+turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
+turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
+try {
+  // ... realizeArrangement call ...
+} finally {
+  turf.union      = origUnion;
+  turf.difference = origDifference;
+  turf.intersect  = origIntersect;
+}
+```
+Best applied inside `realizeArrangement` itself (in arrange.js) so both call sites (onSolve + the optimizer's refineArrangement/scoreAiSeeds) are covered. The `finally` block always restores originals.
 
 ## Pending tasks
 
-- **Commit the score.js maxScore fix** — `Object.values(terms).reduce(...)` change is on disk but not committed
-- **Test AI badges in Phase 2**: Run Optimize, check DevTools console. 3 Gemini requests fire concurrently. Status bar shows `· N AI` if any AI seeds passed the feasibility gate and weren't duplicates of grid candidates.
-- **Test road detection Phase 1**: Draw parcel near a road → boundary close triggers Overpass (~2–8 s) → frontage dropdown pre-fills → magenta polyline appears. Also test null path (parcel far from roads) and the parallelism gate (cross-street should be rejected). Three bugs are now fixed (centroid distance, road-status overwrite, `distFt` ReferenceError) — the Addicks Dam Rd east-side case should now detect correctly.
+- **NEXT: Fix JSTS "Unable to complete output ring" on Solve path** — apply turf monkey-patch inside `realizeArrangement` in arrange.js (see details above)
+- **Commit all session changes** — road.js Phase 2, main.js, optimize.js (isCandidateViable), arrange.js (frontageVAtU + stall fix + parking parcelTurf clip + driveway min depth), score.js (drivewayPresent)
+- **Test AI badges**: Run Optimize, check DevTools console. 3 Gemini requests fire concurrently. Status bar shows `· N AI` if any AI seeds passed the gate.
+- **Remaining stall shortfall on diagonal parcels**: parking area is legitimately clipped when the parcel's road-facing edge is not a straight line. The optimizer penalises this via `parkingMet` + `drivewayPresent`, so it prefers layouts where more stalls fit — but the available space is ultimately constrained by the parcel shape.
 
 ---
 
@@ -1151,14 +1209,22 @@ Right-click `index.html` in VS Code → Open with Live Server → `http://127.0.
 
 ## Git log (recent)
 ```
+bc0ecbf Move project docs to markdow/ subdirectory
+77ebaee Add AI Schema-Proposer Phase 2 + Road Detection Phase 1
+6f03ade Fix maxScore display bug + update SUMMARY for AI Schema-Proposer Phase 1
+a0fde25 Add AI schema-proposer Phase 1: proposeArrangements + aiSeeds pipeline
+b6290ef Add schema optimizer Phases 2–3: local refinement + Web Worker UI
 6767a1f Fix optimizer crash on Turf geometry errors in individual candidates
 b520168 Add schema optimizer Phase 1: arrangement search via realizeArrangement
-b084610 Add arrange.js Phase E: basin placement + fix pondPct=0 bug
-c4bafb8 Add arrange.js Phase D: group/strip placement engine
-49a2606 blah  (← Phase D earlier work)
-fd55d90 Add arrange.js Phase B+C: parking on building face, driveway to frontage
-8387ab0 Update SUMMARY.md with full session detail (scoring, optimizer, Phase A arrange)
-85b1a5e Add scoring, optimizer, and Phase A relational placement engine
+```
+
+**Uncommitted changes on disk (git status: M):**
+- `js/main.js` — frontage reset on boundary close; corner-lot alt-road status; `drivewayPresent` in TERM_LABELS
+- `js/optimize.js` — `isCandidateViable` gate (only building failures disqualify); used in all 4 gate checks
+- `js/road.js` — Phase 2: `candidates[]` array, cardinal dedup, nearest-per-direction
+- `js/arrange.js` — `frontageVAtU`; parking `parcelTurf` clip; driveway min depth; stall count formula (270)
+- `js/score.js` — `drivewayPresent: 0.4` term + computation
+- `markdow/SUMMARY.md` — this file
 189c475 Add frontage UI, fix S/N parking on slanted/tilted parcels
 10e6584 Update SUMMARY.md with full session context
 35eafbe Fix E/W parking stall loss on slanted boundaries via multi-lat edge sampling

@@ -48,6 +48,27 @@ function frontageV(parcelFt, frame) {
   return Math.min(...parcelFt.map(p => feetToLocal(p, frame).v));
 }
 
+// Actual parcel-boundary v at a specific u-position, found by scanning parcel edges.
+// On irregular/diagonal parcels the frontage edge is not a straight line, so the global
+// frontageV is only accurate at one vertex. This function finds the true boundary v at
+// the given uCenter — needed so driveways don't fall outside the parcel on slanted lots.
+function frontageVAtU(parcelFt, frame, uCenter) {
+  const ring = [...parcelFt, parcelFt[0]];
+  let minV = Infinity;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const la = feetToLocal(ring[i], frame);
+    const lb = feetToLocal(ring[i + 1], frame);
+    const uMin = Math.min(la.u, lb.u);
+    const uMax = Math.max(la.u, lb.u);
+    if (uCenter < uMin || uCenter > uMax) continue;
+    const v = Math.abs(lb.u - la.u) < 0.001
+      ? Math.min(la.v, lb.v)
+      : la.v + (uCenter - la.u) / (lb.u - la.u) * (lb.v - la.v);
+    if (v < minV) minV = v;
+  }
+  return isFinite(minV) ? minV : frontageV(parcelFt, frame);
+}
+
 // ---------------------------------------------------------------------------
 // Dependency extraction and topological sort
 // ---------------------------------------------------------------------------
@@ -155,7 +176,7 @@ function elementLocalBounds(el, frame, centroid) {
   return null;
 }
 
-function realizeParking(el, free, parcelFt, frame, centroid, profile, realized) {
+function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
   const place = el.place ?? {};
   const size  = el.size  ?? {};
   const anchorId = place.anchor;
@@ -218,7 +239,11 @@ function realizeParking(el, free, parcelFt, frame, centroid, profile, realized) 
   const anchorBuf   = turf.buffer(anchorFoot, clearanceFt, { units: 'feet' });
   const clearRing   = anchorBuf ? (turf.difference(anchorBuf, anchorFoot) ?? anchorBuf) : null;
   const freeForPark = clearRing ? (turf.union(free, clearRing) ?? free) : free;
-  const clipped = turf.intersect(freeForPark, parkRect);
+  // Intersect with parkRect first, then clip to parcelTurf.
+  // The clearRing buffer around the building can extend beyond the parcel boundary; without
+  // the parcelTurf clip the parking polygon escapes the lot on close-to-road placements.
+  const rawClipped = turf.intersect(freeForPark, parkRect);
+  const clipped    = rawClipped ? (turf.intersect(parcelTurf, rawClipped) ?? rawClipped) : null;
   if (!clipped) {
     return { id: el.id, type: 'parking', feasible: false, reason: 'No overlap with free space' };
   }
@@ -228,7 +253,8 @@ function realizeParking(el, free, parcelFt, frame, centroid, profile, realized) 
              reason: `Parking too small after clipping (${Math.round(actualSqFt)} sq ft)` };
   }
 
-  const actualStalls = Math.floor(actualSqFt / 325);
+  const sqFtPerStall = 9 * ((profile.stallDepthFt ?? 18) + (profile.aisleFt ?? 24) / 2);
+  const actualStalls = Math.floor(actualSqFt / sqFtPerStall);
   const [cMinLng, cMinLat, cMaxLng, cMaxLat] = turf.bbox(clipped);
   const cFt = latLngToFeetFromCentroid(
     { lat: (cMinLat + cMaxLat) / 2, lng: (cMinLng + cMaxLng) / 2 }, centroid
@@ -287,12 +313,14 @@ function realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, rea
     default:      uCenter = (targetBounds.uMin + targetBounds.uMax) / 2; break;
   }
 
-  // v range: from the parcel frontage edge (with a 50 ft over-extension so the clip
-  // to parcel trims it exactly to the boundary) to the target's near edge.
-  // Clamp vTarget to vFront+1 so the rectangle always overlaps the parcel even when
-  // the parking's pre-clip south edge extends below the parcel boundary.
-  const vFront  = frontageV(parcelFt, frame);
-  const vTarget = Math.max(targetBounds.vMin, vFront + 1);
+  // v range: from the actual parcel boundary at this driveway's u-position (with a 50 ft
+  // over-extension so the clip to parcelTurf trims it exactly to the road edge) to the
+  // target's near face. Using frontageVAtU instead of global frontageV prevents the
+  // driveway rectangle from starting inside the parcel on diagonal-edge lots.
+  // Minimum depth = driveway width (halfWidth × 2) so the driveway is never a hair-thin
+  // line when parking extends all the way to the parcel boundary.
+  const vFront  = frontageVAtU(parcelFt, frame, uCenter);
+  const vTarget = Math.max(targetBounds.vMin, vFront + halfWidth * 2);
 
   const ring = [
     [uCenter - halfWidth, vFront - 50],
@@ -361,6 +389,115 @@ function scanGroupPlacement(free, parcelFt, frame, centroid, totalFaceFt, groupD
     }
   }
   return null;
+}
+
+// Fallback: when the strip group is too wide for one row, pack children into multiple
+// rows using scanGroupPlacement (direct containment — not circumradius erosion).
+// Row 1 sits at bSetbackFt from the road; subsequent rows stack behind it.
+// Returns a group result with individualFallback:true so realizeArrangement adopts
+// the already-updated free space rather than subtracting a nonexistent single bbox.
+function realizeGroupFallback(el, childSpecs, free, parcelFt, frame, centroid, profile, setbackFt, vFront, tIsX) {
+  const clearanceFt = profile.clearanceFt ?? 30;
+  const gapFt       = el.gapFt ?? 0;
+
+  // Split children into rows that each fit within the parcel's u-extent (≤95%).
+  // First child of each row is always included even if it alone exceeds the parcel —
+  // scanGroupPlacement will still find the best available position.
+  const parcelUs = parcelFt.map(p => feetToLocal(p, frame).u);
+  const uExtent  = Math.max(...parcelUs) - Math.min(...parcelUs);
+
+  const rows = [];
+  let remaining = [...childSpecs];
+  while (remaining.length > 0) {
+    const row  = [];
+    let faceFt = 0;
+    for (const spec of remaining) {
+      const newFace = row.length === 0 ? spec.faceFt : faceFt + gapFt + spec.faceFt;
+      if (newFace <= uExtent * 0.95 || row.length === 0) {
+        row.push(spec);
+        faceFt = newFace;
+      } else {
+        break;
+      }
+    }
+    rows.push({ specs: row, faceFt });
+    remaining = remaining.slice(row.length);
+  }
+
+  let localFree = free;
+  const childResults = [];
+  let currentV = vFront + setbackFt;
+
+  for (const row of rows) {
+    const rowDepthFt = Math.max(...row.specs.map(s => s.depthFt));
+    const targetV    = currentV + rowDepthFt / 2;
+
+    const rowCenter = scanGroupPlacement(
+      localFree, parcelFt, frame, centroid, row.faceFt, rowDepthFt, 0, targetV,
+    );
+
+    if (!rowCenter) {
+      // No room for this row — mark its children infeasible and advance.
+      for (const cSpec of row.specs) {
+        childResults.push({
+          id: cSpec.id, type: 'building', feasible: false, label: cSpec.id,
+          reason: 'No space for building row in parcel',
+        });
+      }
+      currentV += rowDepthFt + clearanceFt;
+      continue;
+    }
+
+    // Distribute children along t̂ within this row (same logic as the normal strip).
+    const placedLocal = feetToLocal({ x: rowCenter.center_x_ft, y: rowCenter.center_y_ft }, frame);
+    const rowFrontV   = placedLocal.v - rowDepthFt / 2;
+    let   uCursor     = placedLocal.u - row.faceFt / 2;
+
+    for (const cSpec of row.specs) {
+      const childU         = uCursor + cSpec.faceFt / 2;
+      uCursor             += cSpec.faceFt + gapFt;
+      const childV         = rowFrontV + cSpec.depthFt / 2;
+      const childFt        = localToFeet(childU, childV, frame);
+      const faceIsLonger   = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg = tIsX ? (faceIsLonger ? 0 : 90) : (faceIsLonger ? 90 : 0);
+      childResults.push({
+        id:              cSpec.id,
+        type:            'building',
+        feasible:        true,
+        label:           cSpec.id,
+        length_ft:       Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:        Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft:     childFt.x,
+        center_y_ft:     childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+
+    // Subtract this row's bounding box + clearance from free.
+    const faceIsLonger = row.faceFt >= rowDepthFt;
+    const rowFoot = rectPoly(
+      rowCenter.center_x_ft, rowCenter.center_y_ft,
+      Math.max(row.faceFt, rowDepthFt), Math.min(row.faceFt, rowDepthFt),
+      tIsX ? (faceIsLonger ? 0 : 90) : (faceIsLonger ? 90 : 0),
+      centroid,
+    );
+    const buf = turf.buffer(rowFoot, clearanceFt, { units: 'feet' });
+    if (buf) localFree = turf.difference(localFree, buf) ?? localFree;
+
+    // Advance currentV past the rear face + clearance gap so the next row starts there.
+    currentV = placedLocal.v + rowDepthFt / 2 + clearanceFt;
+  }
+
+  const anyFeasible = childResults.some(c => c.feasible);
+  return {
+    id:                 el.id,
+    type:               'group',
+    feasible:           anyFeasible,
+    reason:             anyFeasible ? undefined : 'No buildings could be placed in rows',
+    childResults,
+    freeAfter:          localFree,
+    individualFallback: true,
+  };
 }
 
 // Place a strip group at parcelFrontage and distribute children along t̂.
@@ -432,7 +569,12 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   const groupCenter = scanGroupPlacement(
     free, parcelFt, frame, centroid, totalFaceFt, groupDepthFt, startU, targetV,
   );
-  if (!groupCenter) return failAll('Group bounding box does not fit at parcelFrontage');
+  // Strip doesn't fit as a single row — fall back to placing each building individually
+  // using erosion-based placement (same as realizeBuilding). This handles the case where
+  // the total face width exceeds the parcel width (e.g., 5 large buildings on a tight lot).
+  if (!groupCenter) {
+    return realizeGroupFallback(el, childSpecs, free, parcelFt, frame, centroid, profile, setbackFt, vFront, tIsX);
+  }
   const placed = { ...bSpec, ...groupCenter };
 
   // Distribute children along t̂ inside the placed bounding box.
@@ -589,7 +731,7 @@ function realizeBuilding(el, free, parcelFt, frame, centroid, profile) {
 
 function realizeElement(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized, frontage) {
   if (el.type === 'building') return realizeBuilding(el, free, parcelFt, frame, centroid, profile);
-  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, frame, centroid, profile, realized);
+  if (el.type === 'parking')  return realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized);
   if (el.type === 'driveway') return realizeDriveway(el, parcelFt, parcelTurf, frame, centroid, profile, realized);
   if (el.type === 'group')    return realizeGroup(el, free, parcelFt, frame, centroid, profile);
   if (el.type === 'basin')    return realizeBasin(el, free, parcelFt, centroid, frontage);
@@ -678,11 +820,16 @@ export function realizeArrangement(schema, parcelLngLat, profile) {
       const buf = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
       if (buf) free = turf.difference(free, buf) ?? free;
     } else if (result.feasible && result.type === 'group') {
-      // Groups: subtract the bounding box as a unit — clearance applied once, not per child.
-      const p    = result.placed;
-      const foot = rectPoly(p.center_x_ft, p.center_y_ft, p.length_ft, p.width_ft, result.orientation_deg, centroid);
-      const buf  = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
-      if (buf) free = turf.difference(free, buf) ?? free;
+      if (result.individualFallback) {
+        // Free space was already updated per-child inside realizeGroupFallback; adopt it.
+        if (result.freeAfter) free = result.freeAfter;
+      } else {
+        // Normal strip group: subtract the bounding box as a unit — clearance applied once, not per child.
+        const p    = result.placed;
+        const foot = rectPoly(p.center_x_ft, p.center_y_ft, p.length_ft, p.width_ft, result.orientation_deg, centroid);
+        const buf  = turf.buffer(foot, profile.clearanceFt ?? 30, { units: 'feet' });
+        if (buf) free = turf.difference(free, buf) ?? free;
+      }
     } else if (result.feasible && result.type === 'parking') {
       // Parking: subtract clipped footprint + small gap buffer.
       const buf = turf.buffer(result.feature, profile.gapFt ?? 10, { units: 'feet' });
