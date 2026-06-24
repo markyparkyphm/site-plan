@@ -590,21 +590,36 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   const groupLayout = el.layout ?? 'strip';
 
   // Compute group bounding box dimensions based on layout.
-  // strip: all children in one row along t̂ (face = total width, depth = tallest child).
+  // strip:   one row along t̂ (face = total width, depth = tallest child).
   // stacked: R rows along n̂ (face = widest row, depth = R*rowDepth + gaps).
-  let totalFaceFt, groupDepthFt, stackedR, stackedCols, stackedRowDepthFt;
+  // L:       leg 1 along t̂, leg 2 along n̂ from the leg 1 left end.
+  let totalFaceFt, groupDepthFt, stackedR, stackedCols, stackedRowDepthFt, lGroupSpec;
   if (groupLayout === 'stacked') {
-    stackedR        = Math.ceil(Math.sqrt(N));
-    stackedCols     = Math.ceil(N / stackedR);
+    stackedR          = Math.ceil(Math.sqrt(N));
+    stackedCols       = Math.ceil(N / stackedR);
     stackedRowDepthFt = Math.max(...childSpecs.map(c => c.depthFt));
-    groupDepthFt    = stackedR * stackedRowDepthFt + Math.max(0, stackedR - 1) * gapFt;
-    totalFaceFt     = 0;
+    groupDepthFt      = stackedR * stackedRowDepthFt + Math.max(0, stackedR - 1) * gapFt;
+    totalFaceFt       = 0;
     for (let r = 0; r < stackedR; r++) {
       const rowKids = childSpecs.slice(r * stackedCols, (r + 1) * stackedCols);
       const rowW = rowKids.reduce((s, c) => s + c.faceFt, 0) + Math.max(0, rowKids.length - 1) * gapFt;
       if (rowW > totalFaceFt) totalFaceFt = rowW;
     }
+  } else if (groupLayout === 'L') {
+    const leg1N    = Math.ceil(N / 2);
+    const leg2N    = N - leg1N;
+    const leg1Specs = childSpecs.slice(0, leg1N);
+    const leg2Specs = childSpecs.slice(leg1N);
+    const leg1FaceFt       = leg1Specs.reduce((s, c) => s + c.faceFt, 0) + Math.max(0, leg1N - 1) * gapFt;
+    const leg1DepthFt      = Math.max(...leg1Specs.map(c => c.depthFt));
+    const leg2MaxFaceFt    = leg2Specs.length > 0 ? Math.max(...leg2Specs.map(c => c.faceFt)) : 0;
+    const leg2TotalDepthFt = leg2Specs.reduce((s, c) => s + c.depthFt, 0) + Math.max(0, leg2N - 1) * gapFt;
+    // Bbox spans the full leg1 width; depth covers both legs.
+    totalFaceFt  = Math.max(leg1FaceFt, leg2MaxFaceFt);
+    groupDepthFt = leg1DepthFt + (leg2N > 0 ? gapFt + leg2TotalDepthFt : 0);
+    lGroupSpec   = { leg1Specs, leg2Specs, leg1FaceFt, leg1DepthFt, leg2MaxFaceFt, leg2TotalDepthFt };
   } else {
+    // strip (default)
     totalFaceFt  = childSpecs.reduce((s, c) => s + c.faceFt, 0) + gapFt * (N - 1);
     groupDepthFt = Math.max(...childSpecs.map(c => c.depthFt));
   }
@@ -654,14 +669,16 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   const groupFrontV = placedLocal.v - groupDepthFt / 2;
 
   // Distribute children into the placed bounding box.
-  // strip: one row along t̂, all front faces aligned.
+  // strip:   one row along t̂, all front faces aligned.
   // stacked: R rows along n̂; within each row, children distributed along t̂, front-face aligned.
+  // L:       leg1 strip along t̂ at front face; leg2 stack along n̂ at left edge of leg1.
   const childResults = [];
+  const groupUMin = placedLocal.u - totalFaceFt / 2;
   if (groupLayout === 'stacked') {
     for (let r = 0; r < stackedR; r++) {
       const rowKids  = childSpecs.slice(r * stackedCols, (r + 1) * stackedCols);
       const rowFrontV = groupFrontV + r * (stackedRowDepthFt + gapFt);
-      let uCursor    = placedLocal.u - totalFaceFt / 2;
+      let uCursor    = groupUMin;
       for (const cSpec of rowKids) {
         const childU  = uCursor + cSpec.faceFt / 2;
         uCursor      += cSpec.faceFt + gapFt;
@@ -678,9 +695,45 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
         });
       }
     }
+  } else if (groupLayout === 'L') {
+    const { leg1Specs, leg2Specs, leg1DepthFt } = lGroupSpec;
+    // Leg 1: strip along t̂, front faces at groupFrontV
+    let uCursor = groupUMin;
+    for (const cSpec of leg1Specs) {
+      const childU  = uCursor + cSpec.faceFt / 2;
+      uCursor      += cSpec.faceFt + gapFt;
+      const childV  = groupFrontV + cSpec.depthFt / 2;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+    // Leg 2: stack along n̂ at the left edge of leg1
+    let vCursor = groupFrontV + leg1DepthFt + gapFt;
+    for (const cSpec of leg2Specs) {
+      const childU  = groupUMin + cSpec.faceFt / 2;
+      const childV  = vCursor + cSpec.depthFt / 2;
+      vCursor      += cSpec.depthFt + gapFt;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
   } else {
     // strip: all children's front faces aligned to the group's front face.
-    let uCursor = placedLocal.u - totalFaceFt / 2;
+    let uCursor = groupUMin;
     for (const cSpec of childSpecs) {
       const childU  = uCursor + cSpec.faceFt / 2;
       uCursor      += cSpec.faceFt + gapFt;
