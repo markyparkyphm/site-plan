@@ -32,7 +32,7 @@ export const PROFILES = {
       // Discrete knobs (cross-product enumerated)
       layout:        ['strip', 'stacked'],                   // group layout for multi-building
       gapFt:         [0, 20],                               // inter-building gap (ft) inside a group
-      parkingFaces:  ['front', 'rear', 'left', 'right', 'front+rear'], // which building faces to park against
+      parkingFaces:  ['front', 'rear', 'left', 'right', 'front+rear', 'front+left', 'front+right'], // which building faces to park against
       driveways:     [['left'], ['center'], ['right'], ['left', 'right']], // entryU sets per candidate
       basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
       // Coarse continuous knobs (sampled grid; Phase 2 refines)
