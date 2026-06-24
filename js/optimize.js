@@ -174,7 +174,9 @@ function* generateCandidates(reqs, frontage, searchConfig, state = {}) {
   const filteredDrivewaySets = drivewaySets.filter(s => s.length === reqDwCount);
   const activeDrivewaySets = filteredDrivewaySets.length > 0 ? filteredDrivewaySets : drivewaySets;
   // Layout knob only matters when there are multiple buildings to group.
-  const activeLayouts = reqs.buildings.length > 1 ? layouts : ['strip'];
+  // U requires ≥3 buildings to form a meaningful courtyard shape.
+  const N = reqs.buildings.length;
+  const activeLayouts = N > 1 ? layouts.filter(l => l !== 'U' || N >= 3) : ['strip'];
 
   let count = 0;
   for (const layout of activeLayouts) {

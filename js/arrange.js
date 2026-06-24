@@ -593,7 +593,8 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   // strip:   one row along t̂ (face = total width, depth = tallest child).
   // stacked: R rows along n̂ (face = widest row, depth = R*rowDepth + gaps).
   // L:       leg 1 along t̂, leg 2 along n̂ from the leg 1 left end.
-  let totalFaceFt, groupDepthFt, stackedR, stackedCols, stackedRowDepthFt, lGroupSpec;
+  // U:       leg 1 along t̂, leg 2 along n̂ at left, leg 3 along n̂ at right (courtyard).
+  let totalFaceFt, groupDepthFt, stackedR, stackedCols, stackedRowDepthFt, lGroupSpec, uGroupSpec;
   if (groupLayout === 'stacked') {
     stackedR          = Math.ceil(Math.sqrt(N));
     stackedCols       = Math.ceil(N / stackedR);
@@ -618,6 +619,27 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
     totalFaceFt  = Math.max(leg1FaceFt, leg2MaxFaceFt);
     groupDepthFt = leg1DepthFt + (leg2N > 0 ? gapFt + leg2TotalDepthFt : 0);
     lGroupSpec   = { leg1Specs, leg2Specs, leg1FaceFt, leg1DepthFt, leg2MaxFaceFt, leg2TotalDepthFt };
+  } else if (groupLayout === 'U') {
+    // Distribute: leg1 across front, legs 2+3 down each side.
+    const leg1N = Math.ceil(N / 3);
+    const rem   = N - leg1N;
+    const leg2N = Math.ceil(rem / 2);
+    const leg3N = rem - leg2N;
+    const leg1Specs = childSpecs.slice(0, leg1N);
+    const leg2Specs = childSpecs.slice(leg1N, leg1N + leg2N);
+    const leg3Specs = childSpecs.slice(leg1N + leg2N);
+    const leg1FaceFt        = leg1Specs.reduce((s, c) => s + c.faceFt, 0) + Math.max(0, leg1N - 1) * gapFt;
+    const leg1DepthFt       = Math.max(...leg1Specs.map(c => c.depthFt));
+    const leg2MaxFaceFt     = leg2Specs.length > 0 ? Math.max(...leg2Specs.map(c => c.faceFt)) : 0;
+    const leg3MaxFaceFt     = leg3Specs.length > 0 ? Math.max(...leg3Specs.map(c => c.faceFt)) : 0;
+    const leg2TotalDepthFt  = leg2Specs.reduce((s, c) => s + c.depthFt, 0) + Math.max(0, leg2N - 1) * gapFt;
+    const leg3TotalDepthFt  = leg3Specs.reduce((s, c) => s + c.depthFt, 0) + Math.max(0, leg3N - 1) * gapFt;
+    // Face must fit leg1 AND accommodate both side legs side-by-side.
+    const sidesFaceFt = leg2MaxFaceFt + (leg3N > 0 ? gapFt + leg3MaxFaceFt : 0);
+    totalFaceFt  = Math.max(leg1FaceFt, sidesFaceFt);
+    groupDepthFt = leg1DepthFt + (rem > 0 ? gapFt + Math.max(leg2TotalDepthFt, leg3TotalDepthFt) : 0);
+    uGroupSpec   = { leg1Specs, leg2Specs, leg3Specs, leg1FaceFt, leg1DepthFt,
+                     leg2MaxFaceFt, leg3MaxFaceFt, leg2TotalDepthFt, leg3TotalDepthFt };
   } else {
     // strip (default)
     totalFaceFt  = childSpecs.reduce((s, c) => s + c.faceFt, 0) + gapFt * (N - 1);
@@ -672,6 +694,7 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   // strip:   one row along t̂, all front faces aligned.
   // stacked: R rows along n̂; within each row, children distributed along t̂, front-face aligned.
   // L:       leg1 strip along t̂ at front face; leg2 stack along n̂ at left edge of leg1.
+  // U:       leg1 strip along t̂; leg2 stack at left edge; leg3 stack at right edge (courtyard).
   const childResults = [];
   const groupUMin = placedLocal.u - totalFaceFt / 2;
   if (groupLayout === 'stacked') {
@@ -720,6 +743,61 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
       const childU  = groupUMin + cSpec.faceFt / 2;
       const childV  = vCursor + cSpec.depthFt / 2;
       vCursor      += cSpec.depthFt + gapFt;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+  } else if (groupLayout === 'U') {
+    const { leg1Specs, leg2Specs, leg3Specs, leg1DepthFt, leg3MaxFaceFt } = uGroupSpec;
+    const groupUMax = groupUMin + totalFaceFt;
+    // Leg 1: strip along t̂ at front face
+    let uCursor = groupUMin;
+    for (const cSpec of leg1Specs) {
+      const childU  = uCursor + cSpec.faceFt / 2;
+      uCursor      += cSpec.faceFt + gapFt;
+      const childV  = groupFrontV + cSpec.depthFt / 2;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+    const sideStartV = groupFrontV + leg1DepthFt + gapFt;
+    // Leg 2: stack along n̂ at the left edge
+    let vCursor2 = sideStartV;
+    for (const cSpec of leg2Specs) {
+      const childU  = groupUMin + cSpec.faceFt / 2;
+      const childV  = vCursor2 + cSpec.depthFt / 2;
+      vCursor2     += cSpec.depthFt + gapFt;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+    // Leg 3: stack along n̂ at the right edge
+    let vCursor3 = sideStartV;
+    for (const cSpec of leg3Specs) {
+      const childU  = groupUMax - leg3MaxFaceFt + cSpec.faceFt / 2;
+      const childV  = vCursor3 + cSpec.depthFt / 2;
+      vCursor3     += cSpec.depthFt + gapFt;
       const childFt = localToFeet(childU, childV, frame);
       const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
       const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);

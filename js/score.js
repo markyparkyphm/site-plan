@@ -30,7 +30,7 @@ export const PROFILES = {
     // All knobs live here, not in optimize.js, so profiles control the search space.
     searchConfig: {
       // Discrete knobs (cross-product enumerated)
-      layout:        ['strip', 'stacked', 'L'],               // group layout for multi-building
+      layout:        ['strip', 'stacked', 'L', 'U'],           // group layout for multi-building
       gapFt:         [0, 20],                               // inter-building gap (ft) inside a group
       parkingFaces:  ['front', 'rear', 'left', 'right', 'front+rear', 'front+left', 'front+right'], // which building faces to park against
       driveways:     [['left'], ['center'], ['right'], ['left', 'right']], // entryU sets per candidate
@@ -39,7 +39,7 @@ export const PROFILES = {
       setbackFt:     [15, 25, 35],                          // parcel setback before building placement
       alignU:        ['left', 'center', 'right'],           // lateral alignment of building/group
       // Search limits
-      maxCandidates: 6500,  // 3 layouts×2 gaps×7 faces×4 driveways×4 corners×3 setbacks×3 align ≈ 6048
+      maxCandidates: 8000,  // 4 layouts×2 gaps×7 faces×4 driveways×4 corners×3 setbacks×3 align ≈ 8064
       topK:          4,     // Phase 2 refines around this many Phase 1 winners
       displayK:      10,    // rows shown in the step-through optimizer panel
       // Phase 2 local-refinement config
