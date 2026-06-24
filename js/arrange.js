@@ -212,9 +212,10 @@ function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile
   }
 
   // Get building's local-frame bounds; front face = vMin (closest to road).
-  const ab     = buildingLocalBounds(anchorEl, frame);
-  const faceFt = ab.uMax - ab.uMin;
-  const vFace  = face === 'rear' ? ab.vMax : ab.vMin;
+  const ab      = buildingLocalBounds(anchorEl, frame);
+  // Lateral faces (left/right) span the building's v-depth; axial (front/rear) span u-width.
+  const lateral = (face === 'left' || face === 'right');
+  const faceFt  = lateral ? (ab.vMax - ab.vMin) : (ab.uMax - ab.uMin);
 
   // Size depth from stall target.
   // One row = stallDepthFt stalls + aisleFt/2 (half-aisle shared with the next row).
@@ -225,17 +226,26 @@ function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile
   const rows            = Math.ceil(targetStalls / stallsPerRow);
   const depthFt         = rows * stallRowDepthFt;
 
-  // Parking extends from building face toward frontage ('front') or rearward ('rear').
-  // front: vNear = vFace - depthFt (smaller v = closer to road)
-  const vNear = face === 'rear' ? vFace           : vFace - depthFt;
-  const vFar  = face === 'rear' ? vFace + depthFt : vFace;
+  // Build the pre-clip rectangle and localBounds in local (u, v) coordinates.
+  // front/rear: rectangle spans building u-width, extends in v toward/away from road.
+  // left/right: rectangle spans building v-depth, extends in u off the side face.
+  let uvRing, localBounds;
+  if (!lateral) {
+    const vFace = face === 'rear' ? ab.vMax : ab.vMin;
+    const vNear = face === 'rear' ? vFace           : vFace - depthFt;
+    const vFar  = face === 'rear' ? vFace + depthFt : vFace;
+    uvRing = [[ab.uMin, vNear], [ab.uMax, vNear], [ab.uMax, vFar], [ab.uMin, vFar], [ab.uMin, vNear]];
+    localBounds = { uMin: ab.uMin, uMax: ab.uMax, vMin: vNear, vMax: vFar };
+  } else {
+    const uFace = face === 'right' ? ab.uMax : ab.uMin;
+    const uNear = face === 'right' ? uFace           : uFace - depthFt;
+    const uFar  = face === 'right' ? uFace + depthFt : uFace;
+    uvRing = [[uNear, ab.vMin], [uFar, ab.vMin], [uFar, ab.vMax], [uNear, ab.vMax], [uNear, ab.vMin]];
+    localBounds = { uMin: uNear, uMax: uFar, vMin: ab.vMin, vMax: ab.vMax };
+  }
 
   // Unproject local rectangle corners to WGS84.
-  const ring = [
-    [ab.uMin, vNear], [ab.uMax, vNear],
-    [ab.uMax, vFar],  [ab.uMin, vFar],
-    [ab.uMin, vNear],
-  ].map(([u, v]) => {
+  const ring = uvRing.map(([u, v]) => {
     const ft = localToFeet(u, v, frame);
     const ll = feetToLatLngFromCentroid(ft, centroid);
     return [ll.lng, ll.lat];
@@ -284,7 +294,7 @@ function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile
     id: el.id, type: 'parking', feasible: true,
     feature: clipped, stall_count: actualStalls,
     // Store exact pre-clip local bounds so driveway placement is accurate.
-    localBounds: { uMin: ab.uMin, uMax: ab.uMax, vMin: vNear, vMax: vFar },
+    localBounds,
   };
 }
 
@@ -576,9 +586,28 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
     return { id: c.id, depthFt, faceFt };
   });
 
-  const N            = children.length;
-  const totalFaceFt  = childSpecs.reduce((s, c) => s + c.faceFt, 0) + gapFt * (N - 1);
-  const groupDepthFt = Math.max(...childSpecs.map(c => c.depthFt));
+  const N           = children.length;
+  const groupLayout = el.layout ?? 'strip';
+
+  // Compute group bounding box dimensions based on layout.
+  // strip: all children in one row along t̂ (face = total width, depth = tallest child).
+  // stacked: R rows along n̂ (face = widest row, depth = R*rowDepth + gaps).
+  let totalFaceFt, groupDepthFt, stackedR, stackedCols, stackedRowDepthFt;
+  if (groupLayout === 'stacked') {
+    stackedR        = Math.ceil(Math.sqrt(N));
+    stackedCols     = Math.ceil(N / stackedR);
+    stackedRowDepthFt = Math.max(...childSpecs.map(c => c.depthFt));
+    groupDepthFt    = stackedR * stackedRowDepthFt + Math.max(0, stackedR - 1) * gapFt;
+    totalFaceFt     = 0;
+    for (let r = 0; r < stackedR; r++) {
+      const rowKids = childSpecs.slice(r * stackedCols, (r + 1) * stackedCols);
+      const rowW = rowKids.reduce((s, c) => s + c.faceFt, 0) + Math.max(0, rowKids.length - 1) * gapFt;
+      if (rowW > totalFaceFt) totalFaceFt = rowW;
+    }
+  } else {
+    totalFaceFt  = childSpecs.reduce((s, c) => s + c.faceFt, 0) + gapFt * (N - 1);
+    groupDepthFt = Math.max(...childSpecs.map(c => c.depthFt));
+  }
 
   // Orient bSpec so that length_ft aligns with t̂ (the strip direction).
   // t̂ = x (S/N): orient 0 → length along x; orient 90 → length along y (= n̂).
@@ -614,42 +643,60 @@ function realizeGroup(el, free, parcelFt, frame, centroid, profile) {
   const groupCenter = scanGroupPlacement(
     free, parcelFt, frame, centroid, totalFaceFt, groupDepthFt, startU, targetV,
   );
-  // Strip doesn't fit as a single row — fall back to placing each building individually
-  // using erosion-based placement (same as realizeBuilding). This handles the case where
-  // the total face width exceeds the parcel width (e.g., 5 large buildings on a tight lot).
+  // Group doesn't fit — fall back to placing each building individually using
+  // erosion-based placement. This handles oversized strips and deep stacked configs.
   if (!groupCenter) {
     return realizeGroupFallback(el, childSpecs, free, parcelFt, frame, centroid, profile, setbackFt, vFront, tIsX);
   }
   const placed = { ...bSpec, ...groupCenter };
 
-  // Distribute children along t̂ inside the placed bounding box.
-  // All children's front faces are aligned to the group's front face (not depth-centered).
   const placedLocal = feetToLocal({ x: placed.center_x_ft, y: placed.center_y_ft }, frame);
   const groupFrontV = placedLocal.v - groupDepthFt / 2;
-  let   uCursor     = placedLocal.u - totalFaceFt / 2;
 
-  const childResults = childSpecs.map(cSpec => {
-    const childU   = uCursor + cSpec.faceFt / 2;
-    uCursor       += cSpec.faceFt + gapFt;
-    const childV   = groupFrontV + cSpec.depthFt / 2;
-    const childFt  = localToFeet(childU, childV, frame);
-
-    // Orient child so faceFt is along t̂ and depthFt is along n̂.
-    const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
-    const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
-
-    return {
-      id:              cSpec.id,
-      type:            'building',
-      feasible:        true,
-      label:           cSpec.id,
-      length_ft:       Math.max(cSpec.faceFt, cSpec.depthFt),
-      width_ft:        Math.min(cSpec.faceFt, cSpec.depthFt),
-      center_x_ft:     childFt.x,
-      center_y_ft:     childFt.y,
-      orientation_deg: childOrientDeg,
-    };
-  });
+  // Distribute children into the placed bounding box.
+  // strip: one row along t̂, all front faces aligned.
+  // stacked: R rows along n̂; within each row, children distributed along t̂, front-face aligned.
+  const childResults = [];
+  if (groupLayout === 'stacked') {
+    for (let r = 0; r < stackedR; r++) {
+      const rowKids  = childSpecs.slice(r * stackedCols, (r + 1) * stackedCols);
+      const rowFrontV = groupFrontV + r * (stackedRowDepthFt + gapFt);
+      let uCursor    = placedLocal.u - totalFaceFt / 2;
+      for (const cSpec of rowKids) {
+        const childU  = uCursor + cSpec.faceFt / 2;
+        uCursor      += cSpec.faceFt + gapFt;
+        const childV  = rowFrontV + cSpec.depthFt / 2;
+        const childFt = localToFeet(childU, childV, frame);
+        const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+        const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+        childResults.push({
+          id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+          length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+          width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+          center_x_ft: childFt.x, center_y_ft: childFt.y,
+          orientation_deg: childOrientDeg,
+        });
+      }
+    }
+  } else {
+    // strip: all children's front faces aligned to the group's front face.
+    let uCursor = placedLocal.u - totalFaceFt / 2;
+    for (const cSpec of childSpecs) {
+      const childU  = uCursor + cSpec.faceFt / 2;
+      uCursor      += cSpec.faceFt + gapFt;
+      const childV  = groupFrontV + cSpec.depthFt / 2;
+      const childFt = localToFeet(childU, childV, frame);
+      const childFaceIsLonger = cSpec.faceFt >= cSpec.depthFt;
+      const childOrientDeg    = tIsX ? (childFaceIsLonger ? 0 : 90) : (childFaceIsLonger ? 90 : 0);
+      childResults.push({
+        id: cSpec.id, type: 'building', feasible: true, label: cSpec.id,
+        length_ft: Math.max(cSpec.faceFt, cSpec.depthFt),
+        width_ft:  Math.min(cSpec.faceFt, cSpec.depthFt),
+        center_x_ft: childFt.x, center_y_ft: childFt.y,
+        orientation_deg: childOrientDeg,
+      });
+    }
+  }
 
   return {
     id:              el.id,

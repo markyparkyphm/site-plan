@@ -11,12 +11,12 @@ import { optimizeArrangement } from './optimize.js';
 self.onmessage = ({ data }) => {
   const { parcelLatLng, reqs, frontage, profile, aiSeeds = [], road = null } = data;
 
-  const { ranked, totalTried, gatedOut } = optimizeArrangement(
+  const { ranked, totalTried, gatedOut, truncated } = optimizeArrangement(
     parcelLatLng, reqs, frontage, profile,
     (progress) => self.postMessage({ type: 'progress', ...progress }),
     aiSeeds,
     road,
   );
 
-  self.postMessage({ type: 'done', ranked, totalTried, gatedOut });
+  self.postMessage({ type: 'done', ranked, totalTried, gatedOut, truncated });
 };

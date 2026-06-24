@@ -106,10 +106,10 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
       place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU },
     });
   } else {
-    // Multiple buildings → strip group; parking anchors to the first child.
+    // Multiple buildings → group; parking anchors to the first child.
     firstBuildingId = reqs.buildings[0].label || 'b0';
     elements.push({
-      id: 'g1', type: 'group', layout: 'strip', gapFt,
+      id: 'g1', type: 'group', layout, gapFt,
       place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU },
       children: reqs.buildings.map((b, i) => ({
         id:   b.label || `b${i}`,
@@ -158,7 +158,7 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
 // Generator — yields one schema per cross-product point up to searchConfig.maxCandidates.
 // All value-sets and grid arrays come from searchConfig (profile.searchConfig), not
 // hardcoded here. Widening a value-set in the profile automatically expands the search.
-function* generateCandidates(reqs, frontage, searchConfig) {
+function* generateCandidates(reqs, frontage, searchConfig, state = {}) {
   const {
     layout:       layouts,
     gapFt:        gapFts,
@@ -173,16 +173,18 @@ function* generateCandidates(reqs, frontage, searchConfig) {
   const reqDwCount = reqs.driveways ?? 1;
   const filteredDrivewaySets = drivewaySets.filter(s => s.length === reqDwCount);
   const activeDrivewaySets = filteredDrivewaySets.length > 0 ? filteredDrivewaySets : drivewaySets;
+  // Layout knob only matters when there are multiple buildings to group.
+  const activeLayouts = reqs.buildings.length > 1 ? layouts : ['strip'];
 
   let count = 0;
-  for (const layout of layouts) {
+  for (const layout of activeLayouts) {
     for (const gapFt of gapFts) {
       for (const parkingFaces of parkingFacesSets) {
         for (const driveways of activeDrivewaySets) {
           for (const basinCorner of basinCorners) {
             for (const setbackFt of setbackFts) {
               for (const alignU of alignUs) {
-                if (count >= maxCandidates) return;
+                if (count >= maxCandidates) { state.truncated = true; return; }
                 count++;
                 yield buildCandidateSchema(reqs, frontage, {
                   layout, gapFt, parkingFaces, driveways,
@@ -414,6 +416,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
   turf.difference = (a, b) => { try { return origDifference(a, b); } catch (_) { return null; } };
   turf.intersect  = (a, b) => { try { return origIntersect(a, b);  } catch (_) { return null; } };
 
+  const genState = {};
   try {
     // AI seeds — knob-sets proposed by proposeArrangements on the main thread.
     // Scored through the identical realize→gate→score path as grid candidates.
@@ -445,7 +448,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
     }
 
     // Phase 1: exhaustive discrete cross-product search.
-    for (const schema of generateCandidates(reqs, frontage, searchConfig)) {
+    for (const schema of generateCandidates(reqs, frontage, searchConfig, genState)) {
       const sig = knobSig(schema._knobs);
       if (seenSigs.has(sig)) continue; // already scored via AI seed — skip
       seenSigs.add(sig);
@@ -503,5 +506,5 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
   }
 
   ranked.sort((a, b) => b.total - a.total);
-  return { ranked, totalTried, gatedOut };
+  return { ranked, totalTried, gatedOut, truncated: genState.truncated ?? false };
 }

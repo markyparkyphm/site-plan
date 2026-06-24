@@ -30,16 +30,16 @@ export const PROFILES = {
     // All knobs live here, not in optimize.js, so profiles control the search space.
     searchConfig: {
       // Discrete knobs (cross-product enumerated)
-      layout:        ['strip'],                              // group layout for multi-building
+      layout:        ['strip', 'stacked'],                   // group layout for multi-building
       gapFt:         [0, 20],                               // inter-building gap (ft) inside a group
-      parkingFaces:  ['front'],                             // which building faces to park against
+      parkingFaces:  ['front', 'rear', 'left', 'right', 'front+rear'], // which building faces to park against
       driveways:     [['left'], ['center'], ['right'], ['left', 'right']], // entryU sets per candidate
       basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
       // Coarse continuous knobs (sampled grid; Phase 2 refines)
       setbackFt:     [15, 25, 35],                          // parcel setback before building placement
       alignU:        ['left', 'center', 'right'],           // lateral alignment of building/group
       // Search limits
-      maxCandidates: 500,   // hard cap on generator output (prevents runaway if config widens)
+      maxCandidates: 3000,  // raised for wider parkingFaces×layout space (~2,880 candidates)
       topK:          4,     // Phase 2 refines around this many Phase 1 winners
       displayK:      10,    // rows shown in the step-through optimizer panel
       // Phase 2 local-refinement config
@@ -136,10 +136,12 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile,
   const footprintSqFt = layout.buildings.reduce((s, bl) => s + bl.length_ft * bl.width_ft, 0);
   add('coverageTarget', plateau(footprintSqFt / parcelAreaSqFt, 0.20, 0.25, 0.20));
 
-  // --- drivewayConnected (neutral when no road detected — Decision B from spec) ---
+  // --- drivewayConnected (neutral only when no road detected; 0 when road exists but no driveway) ---
   const dwCount = layout.driveways.length;
-  if (!road?.line || dwCount === 0) {
-    add('drivewayConnected', 1);
+  if (!road?.line) {
+    add('drivewayConnected', 1); // no road detected — can't evaluate, stay neutral
+  } else if (dwCount === 0) {
+    add('drivewayConnected', 0); // road exists but no driveway → not connected
   } else {
     const connectThreshFt = profile.drivewayConnectThreshFt ?? 30;
     const roadBuf = turf.buffer(road.line, connectThreshFt, { units: 'feet' });

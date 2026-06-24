@@ -15,7 +15,8 @@ Browser-based civil site-planning tool. User draws a parcel on a satellite map, 
 - AI Schema-Proposer Phases 1–2: `proposeArrangements` via Gemini (3 bias templates in parallel); seeds scored on main thread and merged into ranked list
 - Road detection Phases 1–2: Overpass query, cardinal snap, dedup by direction, corner-lot multi-candidate, frontage pre-fill, magenta road overlay
 - Driveway length knob + scoring: functional vTarget, knob priority chain, `drivewayConnected` + `drivewayLength` scoring terms replacing `accessQuality`
-- **Regulatory gates Phase 1**: `js/regulatory.js` — 7 hard-gate checkers, `regConfig` in profile, gates wired in all 3 optimizer loops + manual-solve warnings panel
+- **Regulatory gates Phases 1–2**: `js/regulatory.js` — 9 checkers (7 hard, 1 soft, 1 opt-in), `regConfig` in profile, gates wired in all 3 optimizer loops + manual-solve warnings panel
+- **Widen arrangement Phase 1**: side/rear parking faces (`left`, `right`, `rear`, `front+rear`) in `realizeParking`; `stacked` group layout in `realizeGroup`; `searchConfig.parkingFaces` ×5, `layout` ×2, `maxCandidates` 3000; truncation flag in optimizer status line
 
 ---
 
@@ -355,7 +356,7 @@ Right-click `index.html` → Open with Live Server → `http://127.0.0.1:5500`
 
 ## Pending tasks
 
-- **Regulatory gates Phase 2** — ADA accessible stalls, landscape/perimeter buffer, soft penalty terms
+- **Widen arrangement Phase 2** — L/U group layouts, wrapped parking, Decision B (AI-proposer navigation when cap fires routinely)
 - **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set; all are profile knobs
 - **Deploy / key security** — backend proxy for Gemini key; HTTP-referrer restriction on Maps key
 - **Remaining stall shortfall on diagonal parcels** — parking area legitimately clipped by parcel shape; optimizer penalizes via `parkingMet`

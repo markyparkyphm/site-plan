@@ -588,7 +588,7 @@ async function onOptimize() {
           `Optimizing… ${totalTried} tried · best so far: ${best.total.toFixed(2)}`;
 
       } else if (type === 'done') {
-        const { ranked: gridRanked, totalTried: gridTried, gatedOut: gridGatedOut = 0 } = e.data;
+        const { ranked: gridRanked, totalTried: gridTried, gatedOut: gridGatedOut = 0, truncated = false } = e.data;
         optimizerWorker = null;
         document.getElementById('btn-cancel-optimize').style.display = 'none';
 
@@ -611,12 +611,14 @@ async function onOptimize() {
 
         if (ranked.length === 0) {
           const gateNote = totalGated > 0 ? ` (${totalGated} gated out by regulatory rules)` : '';
+          const capNote2 = truncated ? ' · cap reached' : '';
           document.getElementById('status').textContent =
-            `No feasible layouts found (${totalTried} candidates tried)${gateNote}.`;
+            `No feasible layouts found (${totalTried} candidates tried)${gateNote}${capNote2}.`;
           return;
         }
 
         lastRanked = ranked;
+        window._ranked = ranked; // console inspection: _ranked[0].schema._knobs
         const best = ranked[0];
         clearSolveOverlays();
         lastLayout = best.layout;
@@ -626,8 +628,9 @@ async function onOptimize() {
         const k         = best.schema._knobs;
         const aiNote    = newAi.length ? ` · ${newAi.length} AI` : '';
         const gateNote  = totalGated > 0 ? ` · ${totalGated} gated` : '';
+        const capNote   = truncated ? ' · cap reached' : '';
         document.getElementById('status').textContent =
-          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}${gateNote}` +
+          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}${gateNote}${capNote}` +
           ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}`;
       }
     };
@@ -706,7 +709,7 @@ function showSchemaOptimizerResult(ranked) {
   const k = best.schema._knobs;
   document.getElementById('optimizer-winner-label').innerHTML =
     `<span class="opt-winner-label">` +
-    `Winner: setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${fmtAlignU(k.alignU)}` +
+    `Winner: parking ${k.parkingFaces} · setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${fmtAlignU(k.alignU)}` +
     `</span>`;
 
   const container = document.getElementById('optimizer-candidates');
@@ -722,9 +725,9 @@ function showSchemaOptimizerResult(ranked) {
       `<span class="opt-rank">#${i + 1}</span>` +
       `<span class="opt-params">` +
         aiTag +
-        `${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
+        `${ck.parkingFaces} · ${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
         (ck.gapFt > 0 ? ` · gap ${ck.gapFt}ft` : '') +
-        ` · dw:${dwLabel}` +
+        (ck.parkingFaces === 'front' || ck.parkingFaces.includes('front') ? ` · dw:${dwLabel}` : '') +
       `</span>` +
       `<span class="opt-score">${c.total.toFixed(2)}</span>`;
 
