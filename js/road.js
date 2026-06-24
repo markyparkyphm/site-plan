@@ -8,15 +8,44 @@ import { computeScaleFactors } from './projection.js';
 
 export const roadConfig = {
   overpassUrl:       'https://overpass-api.de/api/interpreter',
-  bboxMarginFt:      150,
-  maxDistFt:         300,
-  maxBearingDiffDeg: 35,
-  timeoutMs:         8000,
+  bboxMarginFt:      300,   // expanded: catches roads set back from parcel edge
+  maxDistFt:         500,   // generous: parcel vertices are the reference, not centroid
+  maxBearingDiffDeg: 45,    // widened: handles diagonal parcel edges
+  timeoutMs:         12000,
+  retryTimeoutMs:    18000, // second attempt if first times out
   highwayExclude: [
     'footway', 'path', 'cycleway', 'steps',
     'pedestrian', 'track', 'bridleway', 'corridor',
   ],
 };
+
+async function overpassFetch(query, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(roadConfig.overpassUrl, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body:    `data=${encodeURIComponent(query)}`,
+      signal:  controller.signal,
+    });
+    if (!res.ok) {
+      console.warn(`[road.js] Overpass HTTP ${res.status}`);
+      return null;
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function buildQuery(south, west, north, east) {
+  return [
+    '[out:json][timeout:25];',
+    `way["highway"](${south},${west},${north},${east});`,
+    'out geom;',
+  ].join('\n');
+}
 
 export async function detectRoad(parcelLatLng, centroid) {
   try {
@@ -28,37 +57,33 @@ export async function detectRoad(parcelLatLng, centroid) {
     const south = minLat - padLat, west  = minLng - padLng;
     const north = maxLat + padLat, east  = maxLng + padLng;
 
-    // 2. POST to Overpass (bbox order: south,west,north,east = minLat,minLng,maxLat,maxLng).
-    const query = [
-      '[out:json][timeout:25];',
-      `way["highway"](${south},${west},${north},${east});`,
-      'out geom;',
-    ].join('\n');
-
-    const controller = new AbortController();
-    const timeoutId  = setTimeout(() => controller.abort(), roadConfig.timeoutMs);
-    let data;
+    // 2. POST to Overpass; retry once with a longer timeout if the first attempt fails.
+    let data = null;
     try {
-      const res = await fetch(roadConfig.overpassUrl, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body:    `data=${encodeURIComponent(query)}`,
-        signal:  controller.signal,
-      });
-      if (!res.ok) return null;
-      data = await res.json();
-    } finally {
-      clearTimeout(timeoutId);
+      data = await overpassFetch(buildQuery(south, west, north, east), roadConfig.timeoutMs);
+    } catch (e) {
+      console.warn('[road.js] First Overpass attempt failed, retrying:', e.message);
     }
+    if (!data) {
+      try {
+        data = await overpassFetch(buildQuery(south, west, north, east), roadConfig.retryTimeoutMs);
+      } catch (e) {
+        console.warn('[road.js] Retry also failed:', e.message);
+        return null;
+      }
+    }
+    if (!data) return null;
 
     // 3. Convert ways to Turf LineStrings; drop pedestrian types and <2-node ways.
     const roads = [];
     for (const el of (data.elements ?? [])) {
       if (el.type !== 'way') continue;
       if (!el.geometry || el.geometry.length < 2) continue;
-      if (roadConfig.highwayExclude.includes(el.tags?.highway ?? '')) continue;
-      roads.push(turf.lineString(el.geometry.map(n => [n.lon, n.lat])));
+      const hwType = el.tags?.highway ?? '';
+      if (roadConfig.highwayExclude.includes(hwType)) continue;
+      roads.push(turf.lineString(el.geometry.map(n => [n.lon, n.lat]), { highway: hwType, id: el.id }));
     }
+    console.log(`[road.js] Overpass returned ${data.elements?.length ?? 0} elements, ${roads.length} usable ways`);
     if (roads.length === 0) return null;
 
     // 4. Collect all survivors that pass both gates; nearest wins.
@@ -73,13 +98,17 @@ export async function detectRoad(parcelLatLng, centroid) {
 
     const survivors = [];
     for (const road of roads) {
+      const hwLabel = `way#${road.properties.id} (${road.properties.highway})`;
       // Distance gate uses nearest parcel vertex → road so large parcels don't falsely
       // exceed maxDistFt from the centroid alone.
       const nearest = turf.nearestPointOnLine(road, centroidPt, { units: 'feet' });
       const edgeDist = Math.min(...parcelPts.map(
         pt => turf.nearestPointOnLine(road, pt, { units: 'feet' }).properties.dist,
       ));
-      if (edgeDist > roadConfig.maxDistFt) continue;
+      if (edgeDist > roadConfig.maxDistFt) {
+        console.log(`[road.js] ${hwLabel} DROPPED: edgeDist ${Math.round(edgeDist)} ft > max ${roadConfig.maxDistFt} ft`);
+        continue;
+      }
 
       // Road segment bearing at the nearest-point segment index.
       const coords  = road.geometry.coordinates;
@@ -109,13 +138,17 @@ export async function detectRoad(parcelLatLng, centroid) {
       // Fold bearing difference to 0–90 and reject non-parallel roads.
       let diff = Math.abs(roadBearing - edgeBearing) % 180;
       if (diff > 90) diff = 180 - diff;
-      if (diff > roadConfig.maxBearingDiffDeg) continue;
+      if (diff > roadConfig.maxBearingDiffDeg) {
+        console.log(`[road.js] ${hwLabel} DROPPED: bearing diff ${diff.toFixed(1)}° > max ${roadConfig.maxBearingDiffDeg}° (road ${Math.round(roadBearing)}°, edge ${Math.round(edgeBearing)}°)`);
+        continue;
+      }
 
       // 5. Snap centroid → nearest-point bearing to the nearest cardinal (N/E/S/W).
       const rawBearing = turf.bearing(centroidPt, nearest);
       const normalized = ((rawBearing % 360) + 360) % 360;
       const cardinal   = ['N', 'E', 'S', 'W'][Math.round(normalized / 90) % 4];
 
+      console.log(`[road.js] ${hwLabel} PASSED: edgeDist ${Math.round(edgeDist)} ft, bearingDiff ${diff.toFixed(1)}°, cardinal ${cardinal}`);
       survivors.push({
         cardinal,
         road,
@@ -124,7 +157,10 @@ export async function detectRoad(parcelLatLng, centroid) {
         bearingDiffDeg: diff,
       });
     }
-    if (survivors.length === 0) return null;
+    if (survivors.length === 0) {
+      console.warn('[road.js] All roads failed gates — returning null');
+      return null;
+    }
 
     // Deduplicate by cardinal — keep only the nearest survivor per direction.
     // A single road (e.g. N Eldridge Pkwy) can produce many OSM way segments that all
