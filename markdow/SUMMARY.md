@@ -17,6 +17,12 @@ Browser-based civil site-planning tool. User draws a parcel on a satellite map, 
 - Driveway length knob + scoring: functional vTarget, knob priority chain, `drivewayConnected` + `drivewayLength` scoring terms replacing `accessQuality`
 - **Regulatory gates Phases 1–2**: `js/regulatory.js` — 9 checkers (7 hard, 1 soft, 1 opt-in), `regConfig` in profile, gates wired in all 3 optimizer loops + manual-solve warnings panel
 - **Widen arrangement Phase 1**: side/rear parking faces (`left`, `right`, `rear`, `front+rear`) in `realizeParking`; `stacked` group layout in `realizeGroup`; `searchConfig.parkingFaces` ×5, `layout` ×2, `maxCandidates` 3000; truncation flag in optimizer status line
+- **Widen arrangement Phase 2a**: wrapped parking `front+left` and `front+right` — `buildCandidateSchema` splits `+` and pushes one parking element per face; `searchConfig.parkingFaces` now ×7
+- **Widen arrangement Phase 2b**: L-group layout in `realizeGroup` — leg 1 strips along t̂ at front face, leg 2 stacks along n̂ at left edge; `searchConfig.layout` ×3; `maxCandidates` 6500
+- **Widen arrangement Phase 2c**: U-group layout in `realizeGroup` — leg 1 across front, legs 2+3 down each side forming courtyard; gated to N≥3 buildings in generator; `searchConfig.layout` ×4; `maxCandidates` 8000
+- **Optimizer label fix**: layout knob now shown in winner line and all candidate rows
+- **drivewayConnected fix**: when road exists but no driveway placed, score is 0 (not neutral 1); neutral only when no road detected
+- **road.js reliability**: `bboxMarginFt` 150→300, `maxDistFt` 300→500, `maxBearingDiffDeg` 35→45; automatic retry on timeout (12s then 18s); console diagnostics log which gate rejects each candidate road
 
 ---
 
@@ -139,15 +145,15 @@ drivewayLengthFalloff: 0.5, gapFt: 10,
 ### PROFILES.retail — searchConfig (optimizer knob space)
 ```javascript
 searchConfig: {
-  layout:        ['strip'],
+  layout:        ['strip', 'stacked', 'L', 'U'],   // U gated to N≥3 in generator
   gapFt:         [0, 20],
-  parkingFaces:  ['front'],
+  parkingFaces:  ['front', 'rear', 'left', 'right', 'front+rear', 'front+left', 'front+right'],
   driveways:     [['left'], ['center'], ['right'], ['left', 'right']],
   // filtered to sets whose .length === reqs.driveways before search
   basinCorner:   ['rearLeft', 'rearRight', 'frontLeft', 'frontRight'],
   setbackFt:     [15, 25, 35],
   alignU:        ['left', 'center', 'right'],
-  maxCandidates: 500, topK: 4, displayK: 10,
+  maxCandidates: 8000, topK: 4, displayK: 10,
   refineConfig: {
     setbackStep: 2, setbackRange: 9,
     alignOffsetsFt: [-60, -30, 0, 30, 60],
@@ -313,9 +319,10 @@ Returns `{ setbackFt?, clearanceFt?, basinCorner?, orientationPreference?, front
 ## road.js
 
 ### `detectRoad(parcelLatLng, centroid)` → `roadResult | null`
-- Overpass query `way["highway"]` in parcel bbox + 150 ft margin
-- Distance gate: min vertex→road (not centroid→road, so large parcels work)
-- Parallelism gate: road bearing vs nearest parcel edge ≤ 35°
+- Overpass query `way["highway"]` in parcel bbox + 300 ft margin; retries once (12s → 18s) on failure
+- Distance gate: min vertex→road ≤ 500 ft (not centroid→road, so large parcels work)
+- Parallelism gate: road bearing vs nearest parcel edge ≤ 45° (handles diagonal parcel edges)
+- Console logs each road's pass/fail reason for diagnostics
 - Dedup by cardinal (nearest per direction) → `candidates[]` sorted by distance
 - `candidates[0]` = winner; `candidates.length > 1` = corner lot
 - Never throws
@@ -356,7 +363,8 @@ Right-click `index.html` → Open with Live Server → `http://127.0.0.1:5500`
 
 ## Pending tasks
 
-- **Widen arrangement Phase 2** — L/U group layouts, wrapped parking, Decision B (AI-proposer navigation when cap fires routinely)
+- **Decision B (AI-proposer navigation)** — only once cap fires routinely; hand region-selection to AI proposer instead of brute-force enumeration; tune `topK`/refinement to spend budget on AI-suggested neighborhoods
+- **Perimeter / field lots** — new parking archetype: distribute stalls along parcel edges rather than anchoring to a building face
 - **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set; all are profile knobs
 - **Deploy / key security** — backend proxy for Gemini key; HTTP-referrer restriction on Maps key
 - **Remaining stall shortfall on diagonal parcels** — parking area legitimately clipped by parcel shape; optimizer penalizes via `parkingMet`
