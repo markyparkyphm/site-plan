@@ -11,7 +11,7 @@ export const PROFILES = {
     drivewayPresent: 0.4,
     basinAccuracy:   0.3,
     compactness:     0.15,
-    openSpace:       0.0,
+    openSpace:       0.1,
     // Placement defaults (used by arrange.js; solver.js falls back to the same values)
     setbackFt:            20,
     clearanceFt:          30,
@@ -66,6 +66,10 @@ export const PROFILES = {
         aisleWidth:       { enabled: true,  severity: 'hard', minFt: 24 },
         fireLane:         { enabled: true,  severity: 'hard', minFt: 20 },
         detention:        { enabled: true,  severity: 'hard', areaPerImpervFt: 0.10, approximate: true },
+        // Phase 2
+        adaStalls:        { enabled: true,  severity: 'hard' },
+        landscapeBuffer:  { enabled: false, severity: 'hard', bufferFt: 5 },
+        openSpace:        { enabled: true,  severity: 'soft', min: 0.20 },
       },
     },
   },
@@ -180,7 +184,11 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile,
     add('compactness', clamp01(1 - spread / parcelDiag));
   } else add('compactness', 1);
 
-  add('openSpace', 0);
+  const parkSqFt  = layout.parking_areas.reduce((s, p) => s + turf.area(p) * 10.7639, 0);
+  const dwSqFt    = layout.driveways.reduce((s, d) => s + turf.area(d) * 10.7639, 0);
+  const openRatio = Math.max(0, 1 - (footprintSqFt + parkSqFt + dwSqFt) / parcelAreaSqFt);
+  const openMin   = profile.regConfig?.rules?.openSpace?.min ?? 0.20;
+  add('openSpace', plateau(openRatio, openMin, 1.0, 1.0));
 
   const total    = Object.values(terms).reduce((s, t) => s + t.contribution, 0);
   const maxScore = Object.values(terms).reduce((s, t) => t.weight > 0 ? s + t.weight : s, 0);

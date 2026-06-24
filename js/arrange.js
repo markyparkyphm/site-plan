@@ -176,6 +176,21 @@ function elementLocalBounds(el, frame, centroid) {
   return null;
 }
 
+// ADA Standards Table 208.2 — required accessible stalls by total count.
+function _adaRequired(n) {
+  if (n <= 25)   return 1;
+  if (n <= 50)   return 2;
+  if (n <= 75)   return 3;
+  if (n <= 100)  return 4;
+  if (n <= 150)  return 5;
+  if (n <= 200)  return 6;
+  if (n <= 300)  return 7;
+  if (n <= 400)  return 8;
+  if (n <= 500)  return 9;
+  if (n <= 1000) return Math.ceil(n * 0.02);
+  return 20 + Math.ceil((n - 1000) / 100);
+}
+
 function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile, realized) {
   const place = el.place ?? {};
   const size  = el.size  ?? {};
@@ -254,14 +269,15 @@ function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile
   }
 
   const sqFtPerStall = 9 * ((profile.stallDepthFt ?? 18) + (profile.aisleFt ?? 24) / 2);
-  const actualStalls = Math.floor(actualSqFt / sqFtPerStall);
+  const actualStalls     = Math.floor(actualSqFt / sqFtPerStall);
+  const accessibleStalls = _adaRequired(actualStalls);
   const [cMinLng, cMinLat, cMaxLng, cMaxLat] = turf.bbox(clipped);
   const cFt = latLngToFeetFromCentroid(
     { lat: (cMinLat + cMaxLat) / 2, lng: (cMinLng + cMaxLng) / 2 }, centroid
   );
   clipped.properties = {
     center_x_ft: cFt.x, center_y_ft: cFt.y,
-    orientation_deg: 0, stall_count: actualStalls,
+    orientation_deg: 0, stall_count: actualStalls, accessibleStalls,
   };
 
   return {

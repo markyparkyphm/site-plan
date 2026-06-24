@@ -396,6 +396,7 @@ function onSolve() {
 }
 
 function renderLayout(layout, reqs, isDeterministic, frontageHint) {
+
   const map = getMap();
 
   // Basin — blue-green
@@ -511,7 +512,7 @@ function renderLayout(layout, reqs, isDeterministic, frontageHint) {
   });
 
   // Regulatory gate check — always run; violations render as warnings but do not block display.
-  const gateResult = checkGates(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail);
+const gateResult = checkGates(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail, parcelLatLng);
   if (gateResult.violations.length > 0) {
     const jNote = document.createElement('div');
     jNote.className = 'reg-note';

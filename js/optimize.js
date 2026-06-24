@@ -280,7 +280,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
           if (!isCandidateViable(elements)) continue;
 
           const layout = layoutFromElements(elements);
-          if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
+          if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, parcelLngLat).pass) { gatedOut++; continue; }
           const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
           candidates.push({
             schema,
@@ -322,7 +322,7 @@ export function knobSig(k) {
 // worker. Deduplicates internally. Returns feasible candidate objects tagged source:'ai'.
 // Called from main.js after the worker finishes, to merge AI seeds into the ranked list.
 export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road = null) {
-  if (!seeds.length) return [];
+  if (!seeds.length) return { candidates: [], gatedOut: 0 };
 
   const parcelFt       = latLngToFeet(parcelLngLat);
   const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
@@ -350,7 +350,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road 
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
-      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, parcelLngLat).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       candidates.push({
         schema, layout,
@@ -430,7 +430,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
-      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, parcelLngLat).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       const candidate = {
         schema, layout,
@@ -465,7 +465,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       if (!isCandidateViable(elements)) continue;
 
       const layout = layoutFromElements(elements);
-      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, parcelLngLat).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
 
       const candidate = {

@@ -8,14 +8,30 @@
 // profile's regConfig.rules — the checkGates loop never changes.
 
 import { buildLocalFrame, feetToLocal, buildingLocalBounds } from './arrange.js';
+import { toPoly } from './geometry.js';
 
 const SQFT_PER_SQM = 10.7639;
+
+// ADA Standards Table 208.2 — mirrors _adaRequired in arrange.js.
+function adaRequired(n) {
+  if (n <= 25)   return 1;
+  if (n <= 50)   return 2;
+  if (n <= 75)   return 3;
+  if (n <= 100)  return 4;
+  if (n <= 150)  return 5;
+  if (n <= 200)  return 6;
+  if (n <= 300)  return 7;
+  if (n <= 400)  return 8;
+  if (n <= 500)  return 9;
+  if (n <= 1000) return Math.ceil(n * 0.02);
+  return 20 + Math.ceil((n - 1000) / 100);
+}
 
 // ---------------------------------------------------------------------------
 // Shared-quantity context — computed once, passed to all checkers
 // ---------------------------------------------------------------------------
 
-function deriveContext(layout, parcelFt, parcelAreaSqFt, frontage) {
+function deriveContext(layout, parcelFt, parcelAreaSqFt, frontage, parcelTurf = null) {
   const gfa      = layout.buildings.reduce((s, b) => s + b.length_ft * b.width_ft, 0);
   const footprint = gfa; // rectangular footprints → footprint === gfa
 
@@ -23,7 +39,8 @@ function deriveContext(layout, parcelFt, parcelAreaSqFt, frontage) {
   const drivewaySqFt = layout.driveways.reduce((s, d) => s + turf.area(d) * SQFT_PER_SQM, 0);
   const imperv = footprint + parkingSqFt + drivewaySqFt;
 
-  const stalls = layout.parking_areas.reduce((s, p) => s + (p.properties?.stall_count ?? 0), 0);
+  const stalls           = layout.parking_areas.reduce((s, p) => s + (p.properties?.stall_count ?? 0), 0);
+  const accessibleStalls = layout.parking_areas.reduce((s, p) => s + (p.properties?.accessibleStalls ?? 0), 0);
   const basin  = layout.detention_pond ? turf.area(layout.detention_pond) * SQFT_PER_SQM : 0;
 
   const frame     = buildLocalFrame(frontage);
@@ -35,7 +52,7 @@ function deriveContext(layout, parcelFt, parcelAreaSqFt, frontage) {
 
   return {
     gfa, footprint, parkingSqFt, drivewaySqFt, imperv,
-    stalls, basin, parcelAreaSqFt, frame,
+    stalls, accessibleStalls, basin, parcelAreaSqFt, parcelTurf, frame,
     vFront, parcelVMax, parcelUMin, parcelUMax,
   };
 }
@@ -112,17 +129,63 @@ const RULE_CHECKERS = {
               `${Math.round(required).toLocaleString()} sq ft (${p.areaPerImpervFt} × impervious)${approxNote}`,
     };
   },
+
+  // Phase 2: ADA accessible stalls (Table 208.2). realizeParking types accessibleStalls
+  // from the same table, so this gate documents the requirement and catches any layout
+  // path that omits the property (accessibleStalls defaults to 0 → fails immediately).
+  adaStalls(layout, ctx, p) {
+    if (ctx.stalls === 0) return null;
+    const required = adaRequired(ctx.stalls);
+    if (ctx.accessibleStalls >= required) return null;
+    return {
+      detail: `accessible stalls ${ctx.accessibleStalls} < required ${required} ` +
+              `(ADA Table 208.2 for ${ctx.stalls} total stalls)`,
+    };
+  },
+
+  // Phase 2: perimeter landscape buffer — parking must stay out of the buffer band.
+  // Driveways are exempt (they inherently cross the parcel edge at curb cuts).
+  // Requires parcelLngLat to be passed to checkGates; skipped when absent.
+  // Enabled: false by default — enable per profile when a specific buffer is required.
+  landscapeBuffer(layout, ctx, p) {
+    if (!ctx.parcelTurf) return null;
+    const bufferFt = p.bufferFt ?? 5;
+    const inner = turf.buffer(ctx.parcelTurf, -bufferFt, { units: 'feet' });
+    if (!inner) return null;
+    const band = turf.difference(ctx.parcelTurf, inner);
+    if (!band) return null;
+    for (const pk of layout.parking_areas) {
+      try {
+        if (turf.booleanIntersects(pk, band))
+          return { detail: `parking intrudes into ${bufferFt} ft perimeter landscape buffer` };
+      } catch (_) { /* coincident-edge edge case — skip */ }
+    }
+    return null;
+  },
+
+  // Phase 2: open space soft minimum — surface a warning when impervious coverage is
+  // high, without hard-blocking. Pairs with the openSpace score term in score.js.
+  openSpace(layout, ctx, p) {
+    const ratio = ctx.parcelAreaSqFt > 0
+      ? 1 - ctx.imperv / ctx.parcelAreaSqFt
+      : 1;
+    if (ratio >= p.min) return null;
+    return {
+      detail: `open space ${(ratio * 100).toFixed(1)}% < recommended ${(p.min * 100).toFixed(0)}%`,
+    };
+  },
 };
 
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
-export function checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile) {
+export function checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, parcelLngLat = null) {
   const cfg = profile.regConfig;
   if (!cfg || !cfg.rules) return { pass: true, violations: [] };
 
-  const ctx = deriveContext(layout, parcelFt, parcelAreaSqFt, frontage);
+  const parcelTurf = parcelLngLat ? toPoly(parcelLngLat) : null;
+  const ctx = deriveContext(layout, parcelFt, parcelAreaSqFt, frontage, parcelTurf);
   const violations = [];
 
   for (const [name, rule] of Object.entries(cfg.rules)) {
