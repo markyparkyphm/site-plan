@@ -50,6 +50,24 @@ export const PROFILES = {
         driveLengthOffsetsFt: [-40, -20, 0, 20, 40],  // ft offsets from winner's realized driveway length
       },
     },
+    // Regulatory feasibility gates — checked after realization, before scoring.
+    // Hard failures disqualify candidates (never ranked). Soft violations are surfaced
+    // as warnings on the manual-solve path but do not disqualify.
+    // Values are representative US suburban-commercial stand-ins, NOT a specific adopted code.
+    // Set jurisdiction and rule params to your adopted code before trusting output.
+    regConfig: {
+      useType:      'retail',
+      jurisdiction: 'UNVERIFIED — representative defaults, not an adopted code',
+      rules: {
+        parkingRatioGFA:  { enabled: true,  severity: 'hard', per1000: 4.0 },
+        lotCoverage:      { enabled: true,  severity: 'hard', max: 0.80 },
+        buildingCoverage: { enabled: true,  severity: 'hard', max: 0.40 },
+        setbacks:         { enabled: true,  severity: 'hard', frontFt: 25, sideFt: 10, rearFt: 15 },
+        aisleWidth:       { enabled: true,  severity: 'hard', minFt: 24 },
+        fireLane:         { enabled: true,  severity: 'hard', minFt: 20 },
+        detention:        { enabled: true,  severity: 'hard', areaPerImpervFt: 0.10, approximate: true },
+      },
+    },
   },
 };
 

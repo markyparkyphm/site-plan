@@ -1244,12 +1244,44 @@ try {
 ```
 Best applied inside `realizeArrangement` itself (in arrange.js) so both call sites (onSolve + the optimizer's refineArrangement/scoreAiSeeds) are covered. The `finally` block always restores originals.
 
+## Regulatory Feasibility Gates — Phase 1 COMPLETE
+
+| What | File | Status |
+|------|------|--------|
+| Export `feetToLocal`, `frontageV`, `buildingLocalBounds` from arrange.js | js/arrange.js | ✅ |
+| New module: `RULE_CHECKERS` registry + `deriveContext` + `checkGates` | js/regulatory.js | ✅ |
+| `regConfig` block added to `PROFILES.retail` | js/score.js | ✅ |
+| Gates wired in all 3 optimizer loops (AI seeds, Phase 1, Phase 2 refine) | js/optimize.js | ✅ |
+| `gatedOut` tracked and returned from all loops; forwarded through worker | js/optimize.js + optimizer-worker.js | ✅ |
+| `scoreAiSeeds` returns `{ candidates, gatedOut }` (was bare array) | js/optimize.js | ✅ |
+| Manual-solve: `checkGates` in `renderLayout`; violations in warnings panel | js/main.js | ✅ |
+| `· N gated` in optimizer status line | js/main.js | ✅ |
+| `.reg-note` CSS class for jurisdiction disclaimer | styles.css | ✅ |
+
+### Seven retail checkers (all hard gates)
+| Rule | Check |
+|------|-------|
+| `parkingRatioGFA` | stalls ≥ ceil(GFA/1000 × 4.0) |
+| `lotCoverage` | (footprint+parking+driveway) / parcel ≤ 80% |
+| `buildingCoverage` | footprint / parcel ≤ 40% |
+| `setbacks` | front ≥ 25 ft, side ≥ 10 ft, rear ≥ 15 ft (slant-correct via local frame) |
+| `aisleWidth` | every driveway widthFt ≥ 24 ft (uses `properties.widthFt` from arranger) |
+| `fireLane` | widest driveway ≥ 20 ft |
+| `detention` | basin ≥ 0.10 × impervious area (approximate, flagged) |
+
+### Key design choices
+- `regConfig` lives in `profile` → crosses worker boundary via `postMessage` for free (no new plumbing)
+- `checkGates` loop is data-driven; adding a new use type is a new `regConfig.rules` block + checker registration only
+- `jurisdiction: 'UNVERIFIED…'` surfaces in warnings panel whenever a violation is shown
+- `severity:'hard'` disqualifies (never ranked); `severity:'soft'` → warning only (reserved for Phase 2)
+- `aisleWidth`/`fireLane` fall back to skipping if `properties.widthFt` is absent (legacy solver path)
+
 ## Pending tasks
 
-- **NEXT: Fix JSTS "Unable to complete output ring" on Solve path** — apply turf monkey-patch inside `realizeArrangement` in arrange.js (see "Known remaining bug" section above). Pattern: save originals, replace with null-returning wrappers, restore in finally block.
-- **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set. Eyeball real outputs after testing with various parcels. All 4 constants are profile knobs (`drivewayLengthLo/Hi/Falloff`, `drivewayConnectThreshFt`) — no code change needed to tune.
+- **Regulatory Gates Phase 2** — ADA accessible stalls, landscape/perimeter buffer, soft penalty terms
+- **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set.
 - **Deploy / key security** — backend proxy for Gemini key; HTTP-referrer restriction on Maps key.
-- **Remaining stall shortfall on diagonal parcels**: parking area is legitimately clipped when the parcel's road-facing edge is not a straight line. Optimizer penalizes via `parkingMet`, so it prefers layouts with more stalls — but available space is constrained by parcel shape.
+- **Remaining stall shortfall on diagonal parcels**: parking area is legitimately clipped when the parcel's road-facing edge is not a straight line.
 
 ---
 

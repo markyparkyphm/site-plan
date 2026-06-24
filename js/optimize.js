@@ -2,6 +2,7 @@ import { solveLayout } from './solver.js';
 import { score } from './score.js';
 import { realizeArrangement, buildLocalFrame } from './arrange.js';
 import { latLngToFeet, polygonAreaSqFt } from './projection.js';
+import { checkGates } from './regulatory.js';
 
 // ---------------------------------------------------------------------------
 // Legacy basin-corner optimizer (4 solveLayout calls, kept behind USE_SCHEMA_OPTIMIZER flag)
@@ -235,6 +236,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
 
   const candidates = [];
   let tried = 0;
+  let gatedOut = 0;
 
   for (const winner of topKWinners) {
     const k = winner.schema._knobs;
@@ -278,6 +280,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
           if (!isCandidateViable(elements)) continue;
 
           const layout = layoutFromElements(elements);
+          if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
           const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
           candidates.push({
             schema,
@@ -293,7 +296,7 @@ function refineArrangement(topKWinners, parcelLngLat, reqs, frontage, profile, p
     }
   }
 
-  return { candidates, tried };
+  return { candidates, tried, gatedOut };
 }
 
 // A candidate is viable when at least one building was placed. Partial placements score
@@ -333,6 +336,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road 
 
   const candidates = [];
   const seenSigs   = new Set();
+  let gatedOut = 0;
 
   try {
     for (const knobs of seeds) {
@@ -346,6 +350,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road 
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       candidates.push({
         schema, layout,
@@ -362,7 +367,7 @@ export function scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road 
     turf.intersect  = origIntersect;
   }
 
-  return candidates;
+  return { candidates, gatedOut };
 }
 
 // Main entry point for Phases 1 + 2.
@@ -379,6 +384,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
 
   const ranked = [];
   let totalTried = 0;
+  let gatedOut   = 0;
   let currentBest = null;
   const seenSigs = new Set(); // dedup AI seeds against Phase 1 grid candidates
 
@@ -424,6 +430,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       } catch (_) { continue; }
       if (!isCandidateViable(elements)) continue;
       const layout = layoutFromElements(elements);
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
       const candidate = {
         schema, layout,
@@ -458,6 +465,7 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
       if (!isCandidateViable(elements)) continue;
 
       const layout = layoutFromElements(elements);
+      if (!checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile).pass) { gatedOut++; continue; }
       const result = score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile, road);
 
       const candidate = {
@@ -478,10 +486,11 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
     if (ranked.length > 0) {
       ranked.sort((a, b) => b.total - a.total);
       const topK = searchConfig.topK ?? 4;
-      const { candidates: p2candidates, tried: p2tried } = refineArrangement(
+      const { candidates: p2candidates, tried: p2tried, gatedOut: p2gatedOut } = refineArrangement(
         ranked.slice(0, topK), parcelLngLat, reqs, frontage, profile, parcelFt, parcelAreaSqFt, road
       );
       totalTried += p2tried;
+      gatedOut   += p2gatedOut;
       for (const c of p2candidates) {
         ranked.push(c);
         notifyIfBetter(c);
@@ -494,5 +503,5 @@ export function optimizeArrangement(parcelLngLat, reqs, frontage, profile, onPro
   }
 
   ranked.sort((a, b) => b.total - a.total);
-  return { ranked, totalTried };
+  return { ranked, totalTried, gatedOut };
 }

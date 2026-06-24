@@ -29,7 +29,7 @@ export function buildLocalFrame(frontage) {
   }
 }
 
-function feetToLocal(pt, frame) {
+export function feetToLocal(pt, frame) {
   return {
     u: pt.x * frame.t.x + pt.y * frame.t.y,
     v: pt.x * frame.n.x + pt.y * frame.n.y,
@@ -44,7 +44,7 @@ function localToFeet(u, v, frame) {
 }
 
 // The minimum v across all parcel vertices = the frontage edge in local coords.
-function frontageV(parcelFt, frame) {
+export function frontageV(parcelFt, frame) {
   return Math.min(...parcelFt.map(p => feetToLocal(p, frame).v));
 }
 
@@ -133,7 +133,7 @@ function topoSort(elements, childToGroup = {}) {
 
 // Compute a building's (uMin, uMax, vMin, vMax) in local frame from its placed geometry.
 // vMin = front face (closest to road), vMax = rear face.
-function buildingLocalBounds(b, frame) {
+export function buildingLocalBounds(b, frame) {
   const rad = (b.orientation_deg ?? 0) * Math.PI / 180;
   const cos = Math.cos(rad), sin = Math.sin(rad);
   const hl = b.length_ft / 2, hw = b.width_ft / 2;

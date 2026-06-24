@@ -227,6 +227,13 @@ button {
   font-weight: 600;
 }
 
+.reg-note {
+  font-size: 0.72rem;
+  color: #94a3b8;
+  font-style: italic;
+  margin-top: 4px;
+}
+
 #map { flex: 1; height: 100%; }
 
 #canvas-panel {

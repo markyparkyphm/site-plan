@@ -9,6 +9,7 @@ import { detectRoad } from './road.js';
 import { score, PROFILES } from './score.js';
 import { optimizeLayout, optimizeArrangement, scoreAiSeeds, knobSig } from './optimize.js';
 import { realizeArrangement } from './arrange.js';
+import { checkGates } from './regulatory.js';
 
 // Routes onSolve through realizeArrangement (Phase D/E arranger).
 const USE_ARRANGER = true;
@@ -509,6 +510,21 @@ function renderLayout(layout, reqs, isDeterministic, frontageHint) {
     warningsEl.appendChild(el);
   });
 
+  // Regulatory gate check — always run; violations render as warnings but do not block display.
+  const gateResult = checkGates(layout, reqs, parcelFt, parcelSqFt, resolvedFrontage, PROFILES.retail);
+  if (gateResult.violations.length > 0) {
+    const jNote = document.createElement('div');
+    jNote.className = 'reg-note';
+    jNote.textContent = `Regulatory: ${PROFILES.retail.regConfig.jurisdiction}`;
+    warningsEl.appendChild(jNote);
+    gateResult.violations.forEach(v => {
+      const el = document.createElement('div');
+      el.className = v.severity === 'hard' ? 'error-msg' : 'warning-msg';
+      el.textContent = `⚠ [${v.rule}] ${v.detail}`;
+      warningsEl.appendChild(el);
+    });
+  }
+
   document.getElementById('status').textContent = layout.warnings.length ? '' : 'Layout solved successfully.';
 
   if (layout.warnings.length) console.warn('[Solver]', layout.warnings);
@@ -571,7 +587,7 @@ async function onOptimize() {
           `Optimizing… ${totalTried} tried · best so far: ${best.total.toFixed(2)}`;
 
       } else if (type === 'done') {
-        const { ranked: gridRanked, totalTried: gridTried } = e.data;
+        const { ranked: gridRanked, totalTried: gridTried, gatedOut: gridGatedOut = 0 } = e.data;
         optimizerWorker = null;
         document.getElementById('btn-cancel-optimize').style.display = 'none';
 
@@ -579,20 +595,23 @@ async function onOptimize() {
         // worker. Keep btn-optimize disabled until we have the seeds so the button state
         // is consistent. The turf monkey-patch for JSTS coincident-edge errors is applied
         // inside scoreAiSeeds, same as in the worker's optimizeArrangement.
-        const aiSeeds      = await geminiPromise;
+        const aiSeeds = await geminiPromise;
         document.getElementById('btn-optimize').disabled = false;
 
-        const aiCandidates = scoreAiSeeds(aiSeeds, parcelLatLng, reqs, frontage, PROFILES.retail, detectedRoad);
+        const { candidates: aiCandidates, gatedOut: aiGatedOut = 0 } =
+          scoreAiSeeds(aiSeeds, parcelLatLng, reqs, frontage, PROFILES.retail, detectedRoad);
 
         // Merge: add AI candidates whose knob signature doesn't duplicate a grid result.
         const gridSigs = new Set(gridRanked.map(c => knobSig(c.schema._knobs)));
         const newAi    = aiCandidates.filter(c => !gridSigs.has(knobSig(c.schema._knobs)));
         const ranked   = [...gridRanked, ...newAi].sort((a, b) => b.total - a.total);
         const totalTried = gridTried + aiCandidates.length;
+        const totalGated = gridGatedOut + aiGatedOut;
 
         if (ranked.length === 0) {
+          const gateNote = totalGated > 0 ? ` (${totalGated} gated out by regulatory rules)` : '';
           document.getElementById('status').textContent =
-            `No feasible layouts found (${totalTried} candidates tried).`;
+            `No feasible layouts found (${totalTried} candidates tried)${gateNote}.`;
           return;
         }
 
@@ -603,10 +622,11 @@ async function onOptimize() {
         renderLayout(best.layout, reqs, true, frontage);
         showSchemaOptimizerResult(ranked);
         document.getElementById('btn-render').disabled = false;
-        const k      = best.schema._knobs;
-        const aiNote = newAi.length ? ` · ${newAi.length} AI` : '';
+        const k         = best.schema._knobs;
+        const aiNote    = newAi.length ? ` · ${newAi.length} AI` : '';
+        const gateNote  = totalGated > 0 ? ` · ${totalGated} gated` : '';
         document.getElementById('status').textContent =
-          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}` +
+          `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}${gateNote}` +
           ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}`;
       }
     };
