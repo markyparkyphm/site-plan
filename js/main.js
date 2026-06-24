@@ -709,7 +709,7 @@ function showSchemaOptimizerResult(ranked) {
   const k = best.schema._knobs;
   document.getElementById('optimizer-winner-label').innerHTML =
     `<span class="opt-winner-label">` +
-    `Winner: parking ${k.parkingFaces} · setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${fmtAlignU(k.alignU)}` +
+    `Winner: parking ${k.parkingFaces} · layout ${k.layout} · setback ${k.setbackFt}ft · basin ${k.basinCorner} · align ${fmtAlignU(k.alignU)}` +
     `</span>`;
 
   const container = document.getElementById('optimizer-candidates');
@@ -725,7 +725,7 @@ function showSchemaOptimizerResult(ranked) {
       `<span class="opt-rank">#${i + 1}</span>` +
       `<span class="opt-params">` +
         aiTag +
-        `${ck.parkingFaces} · ${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
+        `${ck.parkingFaces} · ${ck.layout} · ${ck.basinCorner} · ${ck.setbackFt}ft · ${fmtAlignU(ck.alignU)}` +
         (ck.gapFt > 0 ? ` · gap ${ck.gapFt}ft` : '') +
         (ck.parkingFaces === 'front' || ck.parkingFaces.includes('front') ? ` · dw:${dwLabel}` : '') +
       `</span>` +
