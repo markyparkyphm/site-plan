@@ -221,7 +221,7 @@ async function onApplyAI() {
 // Build a minimal arrangement schema from current UI inputs.
 // One building → individual element anchored to parcelFrontage.
 // Multiple buildings → strip group (Phase D) so they're laid side-by-side along the frontage.
-function buildTestSchema(reqs, frontage, setbackFt, basinCorner) {
+function buildTestSchema(reqs, frontage, setbackFt, basinCorner, drivewaySide = null) {
   const elements = [];
   if (reqs.buildings.length === 0) return { frontage, elements };
 
@@ -276,10 +276,16 @@ function buildTestSchema(reqs, frontage, setbackFt, basinCorner) {
 
     // Add driveways connecting parcelFrontage to the parking block.
     if (reqs.driveways > 0) {
-      const count   = Math.min(reqs.driveways, 3);
-      const entryUs = count === 1 ? ['center']
-                    : count === 2 ? ['left', 'right']
-                    :               ['left', 'center', 'right'];
+      const count = Math.min(reqs.driveways, 3);
+      let entryUs;
+      if (drivewaySide) {
+        // AI hint overrides: single driveway at the requested side.
+        entryUs = [drivewaySide];
+      } else {
+        entryUs = count === 1 ? ['center']
+                : count === 2 ? ['left', 'right']
+                :               ['left', 'center', 'right'];
+      }
       entryUs.forEach((entryU, i) => {
         elements.push({
           id:    `d${i + 1}`,
@@ -356,7 +362,7 @@ function onSolve() {
       const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
       const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
       const basinCorner = document.getElementById('input-basin-corner').value;
-      const schema = buildTestSchema(reqs, frontage, setbackFt, basinCorner);
+      const schema = buildTestSchema(reqs, frontage, setbackFt, basinCorner, aiHints.drivewaySide ?? null);
       const { elements } = realizeArrangement(schema, parcelLatLng, PROFILES.retail);
       const layout = layoutFromArrangement(elements);
       lastLayout = layout;

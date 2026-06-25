@@ -12,12 +12,14 @@ Allowed fields (omit any field not mentioned by the user):
 - basinCorner: one of "SW" | "SE" | "NW" | "NE" (which corner to place the detention basin)
 - orientationPreference: one of "NS" | "EW" | "auto" (preferred building axis)
 - frontage: one of "N" | "S" | "E" | "W" (which parcel edge fronts the road)
+- drivewaySide: one of "left" | "center" | "right" (lateral position of driveway entrance along the frontage edge, as seen from the road). Use "left" when user says left, west on N/S frontage, north on E/W frontage. Use "right" for the mirror. Omit if not mentioned.
 
 Output ONLY valid JSON. No explanation, no markdown fences, no extra text.`;
 
-const VALID_CORNERS  = ['SW', 'SE', 'NW', 'NE'];
-const VALID_ORIENTS  = ['NS', 'EW', 'auto'];
-const VALID_FRONTAGE = ['N', 'S', 'E', 'W'];
+const VALID_CORNERS    = ['SW', 'SE', 'NW', 'NE'];
+const VALID_ORIENTS    = ['NS', 'EW', 'auto'];
+const VALID_FRONTAGE   = ['N', 'S', 'E', 'W'];
+const VALID_DW_SIDES   = ['left', 'center', 'right'];
 
 export async function parseInstructions(text) {
   if (!window.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set in config.js');
@@ -55,6 +57,8 @@ export async function parseInstructions(text) {
     hints.orientationPreference = parsed.orientationPreference;
   if (VALID_FRONTAGE.includes(parsed.frontage))
     hints.frontage = parsed.frontage;
+  if (VALID_DW_SIDES.includes(parsed.drivewaySide))
+    hints.drivewaySide = parsed.drivewaySide;
 
   return hints;
 }

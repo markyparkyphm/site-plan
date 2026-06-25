@@ -127,19 +127,23 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
         place: { anchor: firstBuildingId, face },
       });
 
-      // Driveways connect parcelFrontage to front parking only.
-      if (face === 'front') {
-        driveways.forEach((entryU, di) => {
-          const dwSize = { widthFt: 24 };
-          if (Number.isFinite(drivewayLengthFt)) dwSize.lengthFt = drivewayLengthFt;
-          elements.push({
-            id:    `d${fi * 10 + di + 1}`,
-            type:  'driveway',
-            size:  dwSize,
-            place: { connects: 'parcelFrontage', to: parkId, entryU },
-          });
+      // Driveways connect parcelFrontage to every parking face.
+      // For front parking: entryU from the driveways knob (left/center/right of front lot).
+      // For side/rear parking: one driveway per face using the same entryU knob — the lane
+      // runs from the road to the side/rear lot along the matching lateral edge.
+      const faceEntryUs = face === 'left'  ? ['left']
+                        : face === 'right' ? ['right']
+                        : driveways; // front and rear use the full driveways knob
+      faceEntryUs.forEach((entryU, di) => {
+        const dwSize = { widthFt: 24 };
+        if (Number.isFinite(drivewayLengthFt)) dwSize.lengthFt = drivewayLengthFt;
+        elements.push({
+          id:    `d${fi * 10 + di + 1}`,
+          type:  'driveway',
+          size:  dwSize,
+          place: { connects: 'parcelFrontage', to: parkId, entryU },
         });
-      }
+      });
     });
   }
 
