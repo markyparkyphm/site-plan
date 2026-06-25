@@ -18,11 +18,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Inject API keys
+        env:
+          MAPS_KEY: ${{ secrets.MAPS_API_KEY }}
+          GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          cat > config.js <<EOF
-          window.MAPS_API_KEY   = "${{ secrets.MAPS_API_KEY }}";
-          window.GEMINI_API_KEY = "${{ secrets.GEMINI_API_KEY }}";
-          EOF
+          echo "window.MAPS_API_KEY = \"$MAPS_KEY\";" > config.js
+          echo "window.GEMINI_API_KEY = \"$GEMINI_KEY\";" >> config.js
+          echo "config.js written ($(wc -c < config.js) bytes)"
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
