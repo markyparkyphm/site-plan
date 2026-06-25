@@ -25,7 +25,9 @@ Browser-based civil site-planning tool. User draws a parcel on a satellite map, 
 - **road.js reliability**: `bboxMarginFt` 150→300, `maxDistFt` 300→500, `maxBearingDiffDeg` 35→45; automatic retry on timeout (12s then 18s); console diagnostics log which gate rejects each candidate road
 - **Styled 2D rendering** (`render.js` + `arrange.js`): buildings render with drop shadow, slate roof fill, inset parapet line, entry marker, haloed label; parking renders as dark asphalt field with white stall stripes (clipped per polygon, lateral reorder for left/right faces) + lighter aisle lines + stall-count label; driveways render as paved asphalt with dashed yellow centerline; basin renders as teal water body with inset waterline rings. `arrange.js` now exposes stall grid on `clipped.properties` (ring, rows, stallsPerRow, stallDepthFt, aisleFt) for the renderer.
 - **Driveway fixes** (`optimize.js` + `ai.js` + `main.js`): (1) `buildCandidateSchema` previously only added driveway elements when `face === 'front'` — left/right/rear parking had no driveway, costing −0.80 in score. Fixed: left face → `entryU:'left'`, right face → `entryU:'right'`, rear/front → full `driveways` knob. (2) `parseInstructions` now recognises `drivewaySide` (`'left'|'center'|'right'`) so user hints like "put driveway on west side" map correctly; `buildTestSchema` uses it to override the default `entryU`.
-- **Parking distribution scoring Phase 1** (`score.js` — **implemented, not yet committed**): `parkingMet` now sums `stall_count` across ALL `parking_areas` (was `[0]` only); `parkingInFront` uses a stall-weighted mean depth across all lots (was first lot only). Fixes silent under-scoring of `front+rear` and any future multi-lot distributed layouts. Phase 2 (per-building proportional allocation in `buildCandidateSchema`) is **next — use Plan Mode**.
+- **Parking distribution Phase 1** (`score.js`): `parkingMet` sums `stall_count` across ALL `parking_areas` (was `[0]` only); `parkingInFront` uses stall-weighted mean depth across all lots (was first lot only). Fixes silent under-scoring of `front+rear` and multi-lot layouts.
+- **Parking distribution Phase 2** (`optimize.js` `buildCandidateSchema`): added `splitStallsByGFA` helper — allocates total stalls across buildings proportional to GFA via largest-remainder integer rounding. Each face now emits one parking element per building anchored to that building, sized to its share. `bSetbackFt` derives from max per-building front-parking depth (not total stalls over building A's face). Driveways remain tied to `reqs.driveways`, anchored to the first funded lot per face. Multi-building strip now produces a continuous frontage band of lots instead of one oversized lot clipped against free space.
+- **Building row remove button** (`index.html`, `main.js`, `styles.css`): each building row in the sidebar has a `×` button; clicking it removes the row (guarded to keep at least one). Fixed `width: auto` override on the global `button { width: 100% }` rule to prevent layout breakage.
 
 ---
 
@@ -366,10 +368,6 @@ Right-click `index.html` → Open with Live Server → `http://127.0.0.1:5500`
 ---
 
 ## Pending tasks
-
-### Immediate (next session)
-- **Parking distribution Phase 1 — commit** — `score.js` changes are implemented but not committed; commit + push before starting Phase 2
-- **Parking distribution Phase 2 — Plan Mode** — `buildCandidateSchema` in `optimize.js`: add `splitStallsByGFA` helper, allocate stalls per building proportional to GFA, emit one parking element per building per face anchored to that building, derive `bSetbackFt` from max per-building front depth. Spec is at `markdow/parking-distribution-spec.md` §2a–2d. **Do not start without Plan Mode.**
 
 ### Subsequent
 - **Decision B (AI-proposer navigation)** — only once cap fires routinely; hand region-selection to AI proposer instead of brute-force enumeration; tune `topK`/refinement to spend budget on AI-suggested neighborhoods
