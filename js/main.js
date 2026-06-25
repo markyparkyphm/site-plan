@@ -56,6 +56,9 @@ export function init() {
   document.getElementById('input-setback').addEventListener('change', onSetbackChange);
   document.getElementById('btn-solve').addEventListener('click', onSolve);
   document.getElementById('btn-add-building').addEventListener('click', addBuildingRow);
+  document.getElementById('buildings-list').addEventListener('click', e => {
+    if (e.target.classList.contains('btn-remove-building')) removeBuildingRow(e.target);
+  });
   document.getElementById('btn-render').addEventListener('click', onRender);
   document.getElementById('btn-export').addEventListener('click', onExport);
   document.getElementById('btn-close-canvas').addEventListener('click', () => {
@@ -77,8 +80,15 @@ function addBuildingRow() {
     <input class="b-label" type="text"   placeholder="Label" value="${label}">
     <input class="b-len"   type="number" placeholder="L ft"  value="150" min="10">
     <input class="b-wid"   type="number" placeholder="W ft"  value="80"  min="10">
+    <button class="btn-remove-building" title="Remove building">×</button>
   `;
   list.appendChild(row);
+}
+
+function removeBuildingRow(btn) {
+  const list = document.getElementById('buildings-list');
+  if (list.children.length <= 1) return;
+  btn.closest('.building-row').remove();
 }
 
 function getBuildings() {
