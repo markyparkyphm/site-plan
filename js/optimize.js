@@ -66,6 +66,22 @@ function layoutFromElements(elements) {
   };
 }
 
+// Allocate `total` stalls across buildings proportional to GFA. Integer shares that
+// sum EXACTLY to `total`; remainder goes to the largest fractional parts.
+function splitStallsByGFA(buildings, total) {
+  if (total <= 0 || buildings.length === 0) return buildings.map(() => 0);
+  const areas = buildings.map(b => b.length_ft * b.width_ft);
+  const totalArea = areas.reduce((s, a) => s + a, 0) || 1;
+  const raw = areas.map(a => total * a / totalArea);
+  const shares = raw.map(Math.floor);
+  let remainder = total - shares.reduce((s, v) => s + v, 0);
+  const byFrac = raw
+    .map((v, i) => ({ i, frac: v - Math.floor(v) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let k = 0; remainder > 0; k++, remainder--) shares[byFrac[k % byFrac.length].i]++;
+  return shares;
+}
+
 // Build one arrangement schema from a knob-value point.
 // Program dimensions (building sizes, stall count, pond %) come from reqs unchanged.
 // Only arrangement decisions (setback, alignment, gap, basin corner, driveways) vary.
@@ -79,20 +95,26 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
   const elements = [];
   if (reqs.buildings.length === 0) return { frontage, elements, _knobs: knobs };
 
-  // Pre-compute how deep front parking will be so the building can be pushed back
-  // exactly that far — mirrors buildTestSchema logic in main.js.
-  const firstB        = reqs.buildings[0];
-  const firstArea     = firstB.length_ft * firstB.width_ft;
-  const firstMaxDepth = Math.min(firstB.length_ft, firstB.width_ft);
-  const firstDepth    = Math.min(firstMaxDepth, Math.sqrt(firstArea));
-  const firstFace     = firstArea / firstDepth;
-  const stallsPerRow  = Math.max(1, Math.floor(firstFace / 9));
+  const STALL_WIDTH_FT = 9;
+  const ROW_DEPTH_FT = 30;
 
   const faces = parkingFaces.split('+');
   const hasFrontParking = faces.includes('front') && reqs.parking_stalls > 0;
-  const parkRows    = hasFrontParking ? Math.ceil(reqs.parking_stalls / stallsPerRow) : 0;
-  const parkDepthFt = parkRows * 30; // stallDepthFt(18) + aisleFt(24)/2 per row
-  const bSetbackFt  = setbackFt + parkDepthFt;
+
+  const stallShares = splitStallsByGFA(reqs.buildings, reqs.parking_stalls);
+
+  let maxFrontDepthFt = 0;
+  if (hasFrontParking) {
+    reqs.buildings.forEach((b, i) => {
+      const area = b.length_ft * b.width_ft;
+      const depth = Math.min(Math.min(b.length_ft, b.width_ft), Math.sqrt(area));
+      const face = area / depth;
+      const stallsPerRow = Math.max(1, Math.floor(face / STALL_WIDTH_FT));
+      const rows = Math.ceil((stallShares[i] || 0) / stallsPerRow);
+      maxFrontDepthFt = Math.max(maxFrontDepthFt, rows * ROW_DEPTH_FT);
+    });
+  }
+  const bSetbackFt = setbackFt + maxFrontDepthFt;
 
   let firstBuildingId;
 
@@ -100,13 +122,14 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
     const b  = reqs.buildings[0];
     const id = b.label || 'b1';
     firstBuildingId = id;
+    var buildingIds = [id];
     elements.push({
       id, type: 'building',
       size:  { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
       place: { anchor: 'parcelFrontage', setbackFt: bSetbackFt, alignU },
     });
   } else {
-    // Multiple buildings → group; parking anchors to the first child.
+    // Multiple buildings → group; parking distributed per building.
     firstBuildingId = reqs.buildings[0].label || 'b0';
     elements.push({
       id: 'g1', type: 'group', layout, gapFt,
@@ -116,34 +139,40 @@ export function buildCandidateSchema(reqs, frontage, knobs) {
         size: { areaSqFt: b.length_ft * b.width_ft, maxDepthFt: Math.min(b.length_ft, b.width_ft) },
       })),
     });
+    var buildingIds = reqs.buildings.map((b, i) => b.label || `b${i}`);
   }
 
   if (reqs.parking_stalls > 0) {
     faces.forEach((face, fi) => {
-      const parkId = `p${fi + 1}`;
-      elements.push({
-        id: parkId, type: 'parking',
-        size:  { stalls: reqs.parking_stalls },
-        place: { anchor: firstBuildingId, face },
-      });
-
-      // Driveways connect parcelFrontage to every parking face.
-      // For front parking: entryU from the driveways knob (left/center/right of front lot).
-      // For side/rear parking: one driveway per face using the same entryU knob — the lane
-      // runs from the road to the side/rear lot along the matching lateral edge.
-      const faceEntryUs = face === 'left'  ? ['left']
-                        : face === 'right' ? ['right']
-                        : driveways; // front and rear use the full driveways knob
-      faceEntryUs.forEach((entryU, di) => {
-        const dwSize = { widthFt: 24 };
-        if (Number.isFinite(drivewayLengthFt)) dwSize.lengthFt = drivewayLengthFt;
+      // One lot per building on this face, sized to that building's GFA share.
+      buildingIds.forEach((bId, bi) => {
+        if ((stallShares[bi] || 0) <= 0) return;
         elements.push({
-          id:    `d${fi * 10 + di + 1}`,
-          type:  'driveway',
-          size:  dwSize,
-          place: { connects: 'parcelFrontage', to: parkId, entryU },
+          id: `p${fi}_${bi}`,
+          type: 'parking',
+          size: { stalls: stallShares[bi] },
+          place: { anchor: bId, face },
         });
       });
+
+      // One driveway set per face, anchored to the first funded lot.
+      const repBi = buildingIds.findIndex((_, bi) => (stallShares[bi] || 0) > 0);
+      if (repBi >= 0) {
+        const repParkId = `p${fi}_${repBi}`;
+        const faceEntryUs = face === 'left'  ? ['left']
+                          : face === 'right' ? ['right']
+                          : driveways;
+        faceEntryUs.forEach((entryU, di) => {
+          const dwSize = { widthFt: 24 };
+          if (Number.isFinite(drivewayLengthFt)) dwSize.lengthFt = drivewayLengthFt;
+          elements.push({
+            id:   `d${fi * 10 + di + 1}`,
+            type: 'driveway',
+            size: dwSize,
+            place: { connects: 'parcelFrontage', to: repParkId, entryU },
+          });
+        });
+      }
     });
   }
 
