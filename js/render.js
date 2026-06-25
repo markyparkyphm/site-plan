@@ -1,5 +1,5 @@
 import { polysOf, rectPoly } from './geometry.js';
-import { feetToLatLngFromCentroid } from './projection.js';
+import { feetToLatLngFromCentroid, latLngToFeetFromCentroid } from './projection.js';
 
 function lngLatToWorldPx(lng, lat, zoom) {
   const size = 256 * Math.pow(2, zoom);
@@ -74,39 +74,209 @@ export async function renderLayoutOnCanvas(canvas, parcelLatLng, layout, centroi
     ctx.closePath();
     ctx.fillStyle = fillColor;
     ctx.fill();
-    ctx.strokeStyle = strokeColor;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
+    if (lineWidth > 0) {
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = lineWidth;
+      ctx.stroke();
+    }
+  }
+
+  function offsetPts(pts, dx, dy) {
+    return pts.map(({ cx, cy }) => ({ cx: cx + dx, cy: cy + dy }));
+  }
+
+  function buildingPts(b, insetFt = 0) {
+    const L = b.length_ft - 2 * insetFt;
+    const W = b.width_ft  - 2 * insetFt;
+    if (L <= 0 || W <= 0) return null;
+    const foot = rectPoly(b.center_x_ft, b.center_y_ft, L, W, b.orientation_deg ?? 0, centroid);
+    const poly = polysOf(foot)[0];
+    return poly ? turfPolyToCanvas(poly) : null;
+  }
+
+  function longAxisEndpointsFt(poly) {
+    const ring = poly.geometry.coordinates[0].slice(0, -1)
+      .map(([lng, lat]) => latLngToFeetFromCentroid({ lng, lat }, centroid));
+    if (ring.length < 3) return null;
+
+    let dir = null, maxLen = -1;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+      if (len > maxLen) { maxLen = len; dir = { x: dx / len, y: dy / len }; }
+    }
+    if (!dir) return null;
+
+    const cxf = ring.reduce((s, p) => s + p.x, 0) / ring.length;
+    const cyf = ring.reduce((s, p) => s + p.y, 0) / ring.length;
+
+    let sMin = Infinity, sMax = -Infinity;
+    for (const p of ring) {
+      const s = (p.x - cxf) * dir.x + (p.y - cyf) * dir.y;
+      if (s < sMin) sMin = s; if (s > sMax) sMax = s;
+    }
+    const inset = 4;
+    const s0 = sMin + inset, s1 = sMax - inset;
+    if (s1 <= s0) return null;
+    return [
+      { x: cxf + dir.x * s0, y: cyf + dir.y * s0 },
+      { x: cxf + dir.x * s1, y: cyf + dir.y * s1 },
+    ];
+  }
+
+  function bilerp(ring, uF, vF) {
+    const [P00, P10, P11, P01] = ring;
+    const a = (1-uF)*(1-vF), b = uF*(1-vF), c = uF*vF, d = (1-uF)*vF;
+    return {
+      lng: a*P00[0] + b*P10[0] + c*P11[0] + d*P01[0],
+      lat: a*P00[1] + b*P10[1] + c*P11[1] + d*P01[1],
+    };
   }
 
   // Draw order: parcel → basin → parking → driveways → buildings → scale bar
   drawPoly(parcelLatLng.map(p => project(p.lng, p.lat)), '#facc15', 'rgba(250,204,21,0.05)', 2);
 
+  const BASIN = {
+    water: 'rgba(14,116,144,0.5)', edge: '#0e7490',
+    bank:  'rgba(45,212,191,0.35)',
+  };
+
   if (layout.detention_pond) {
-    polysOf(layout.detention_pond).forEach(poly =>
-      drawPoly(turfPolyToCanvas(poly), '#06b6d4', 'rgba(6,182,212,0.35)', 2));
+    polysOf(layout.detention_pond).forEach(poly => {
+      drawPoly(turfPolyToCanvas(poly), BASIN.edge, BASIN.water, 1.5);
+
+      for (const insetFt of [6, 14]) {
+        let inner = null;
+        try { inner = turf.buffer(poly, -insetFt, { units: 'feet' }); } catch (_) { inner = null; }
+        const piece = inner && polysOf(inner)[0];
+        if (piece) drawPoly(turfPolyToCanvas(piece), BASIN.bank, 'rgba(0,0,0,0)', 1);
+      }
+    });
   }
 
-  layout.parking_areas.forEach(p =>
+  const ASPHALT = { fill: 'rgba(38,40,46,0.58)', edge: '#11151c' };
+  const STRIPE  = 'rgba(255,255,255,0.7)';
+  const AISLE   = 'rgba(255,255,255,0.18)';
+
+  layout.parking_areas.forEach(p => {
+    const grid = p.properties?.grid;
+
     polysOf(p).forEach(poly =>
-      drawPoly(turfPolyToCanvas(poly), '#fbbf24', 'rgba(251,191,36,0.35)', 2)));
+      drawPoly(turfPolyToCanvas(poly), ASPHALT.edge, ASPHALT.fill, 1.5));
+
+    if (!grid) return;
+
+    const { ring, rows, stallsPerRow, stallDepthFt, aisleFt } = grid;
+    const rowBandFt = stallDepthFt + aisleFt / 2;
+    const totalVFt  = rows * rowBandFt;
+
+    for (let r = 0; r < rows; r++) {
+      const vStall0 = (r * rowBandFt) / totalVFt;
+      const vStall1 = (r * rowBandFt + stallDepthFt) / totalVFt;
+      const vAisle  = (r * rowBandFt + stallDepthFt + aisleFt / 4) / totalVFt;
+
+      for (let c = 0; c < stallsPerRow; c++) {
+        const uMidF    = (c + 0.5) / stallsPerRow;
+        const centerLL = bilerp(ring, uMidF, (vStall0 + vStall1) / 2);
+        if (!turf.booleanPointInPolygon(turf.point([centerLL.lng, centerLL.lat]), p)) continue;
+
+        const u0 = c / stallsPerRow, u1 = (c + 1) / stallsPerRow;
+        const corners = [
+          bilerp(ring, u0, vStall0), bilerp(ring, u1, vStall0),
+          bilerp(ring, u1, vStall1), bilerp(ring, u0, vStall1),
+        ].map(({ lng, lat }) => project(lng, lat));
+        drawPoly(corners, STRIPE, 'rgba(0,0,0,0)', 1);
+      }
+
+      const aL = project(bilerp(ring, 0, vAisle).lng, bilerp(ring, 0, vAisle).lat);
+      const aR = project(bilerp(ring, 1, vAisle).lng, bilerp(ring, 1, vAisle).lat);
+      ctx.strokeStyle = AISLE; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(aL.cx, aL.cy); ctx.lineTo(aR.cx, aR.cy); ctx.stroke();
+    }
+
+    const pk = p.properties;
+    if (pk?.center_x_ft != null) {
+      const ll = feetToLatLngFromCentroid({ x: pk.center_x_ft, y: pk.center_y_ft }, centroid);
+      const { cx, cy } = project(ll.lng, ll.lat);
+      const text = `${pk.stall_count} stalls`;
+      ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.strokeText(text, cx, cy);
+      ctx.fillStyle = '#fff'; ctx.fillText(text, cx, cy);
+    }
+  });
+
+  const DRIVE = { fill: 'rgba(44,46,52,0.6)', edge: '#11151c', center: 'rgba(250,204,21,0.55)' };
 
   layout.driveways.forEach(d =>
-    polysOf(d).forEach(poly =>
-      drawPoly(turfPolyToCanvas(poly), '#f97316', 'rgba(249,115,22,0.35)', 2)));
+    polysOf(d).forEach(poly => {
+      drawPoly(turfPolyToCanvas(poly), DRIVE.edge, DRIVE.fill, 1.5);
+
+      const ends = longAxisEndpointsFt(poly);
+      if (ends) {
+        const a = feetToLatLngFromCentroid(ends[0], centroid);
+        const b = feetToLatLngFromCentroid(ends[1], centroid);
+        const pa = project(a.lng, a.lat), pb = project(b.lng, b.lat);
+        ctx.save();
+        ctx.strokeStyle = DRIVE.center; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
+        ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
+        ctx.restore();
+      }
+    }));
+
+  const ROOF      = { fill: 'rgba(60,68,84,0.92)', edge: '#0f1420', parapet: 'rgba(255,255,255,0.22)' };
+  const ENTRY     = 'rgba(250,204,21,0.95)';
+  const SHADOW    = 'rgba(0,0,0,0.28)';
+  const SHADOW_PX = 5;
 
   layout.buildings.forEach(b => {
-    const foot = rectPoly(b.center_x_ft, b.center_y_ft, b.length_ft, b.width_ft, b.orientation_deg, centroid);
-    polysOf(foot).forEach(poly =>
-      drawPoly(turfPolyToCanvas(poly), '#ef4444', 'rgba(239,68,68,0.5)', 2));
+    const footPts = buildingPts(b);
+    if (!footPts) return;
 
+    // Drop shadow (fill only — lineWidth 0 skips stroke via guard above)
+    drawPoly(offsetPts(footPts, SHADOW_PX, SHADOW_PX), 'rgba(0,0,0,0)', SHADOW, 0);
+
+    // Roof fill + crisp edge
+    drawPoly(footPts, ROOF.edge, ROOF.fill, 1.5);
+
+    // Inset parapet line (skip tiny footprints)
+    const inner = buildingPts(b, 6);
+    if (inner) drawPoly(inner, ROOF.parapet, 'rgba(0,0,0,0)', 1);
+
+    // Entry marker on the wall nearest the parking
+    const pk = layout.parking_areas[0]?.properties;
+    if (pk) {
+      const rad = (b.orientation_deg ?? 0) * Math.PI / 180;
+      const ax  = { x: Math.cos(rad),  y: Math.sin(rad)  };
+      const px  = { x: -Math.sin(rad), y: Math.cos(rad)  };
+      const hl  = b.length_ft / 2, hw = b.width_ft / 2;
+
+      const mids = [
+        { x: b.center_x_ft + ax.x*hl, y: b.center_y_ft + ax.y*hl, perp: true  },
+        { x: b.center_x_ft - ax.x*hl, y: b.center_y_ft - ax.y*hl, perp: true  },
+        { x: b.center_x_ft + px.x*hw, y: b.center_y_ft + px.y*hw, perp: false },
+        { x: b.center_x_ft - px.x*hw, y: b.center_y_ft - px.y*hw, perp: false },
+      ];
+      const near = mids.reduce((best, m) => {
+        const dx = m.x - pk.center_x_ft, dy = m.y - pk.center_y_ft;
+        const d2 = dx*dx + dy*dy;
+        return d2 < best.d2 ? { m, d2 } : best;
+      }, { m: null, d2: Infinity }).m;
+
+      const eLen = near.perp ? 3 : 8;
+      const eWid = near.perp ? 8 : 3;
+      const eRect = rectPoly(near.x, near.y, eLen, eWid, b.orientation_deg ?? 0, centroid);
+      const ePoly = polysOf(eRect)[0];
+      if (ePoly) drawPoly(turfPolyToCanvas(ePoly), ROOF.edge, ENTRY, 1);
+    }
+
+    // Label with dark halo for legibility
     const center = feetToLatLngFromCentroid({ x: b.center_x_ft, y: b.center_y_ft }, centroid);
     const { cx, cy } = project(center.lng, center.lat);
-    ctx.fillStyle = '#fff';
+    const text = `${b.label} ${b.length_ft}×${b.width_ft}ft`;
     ctx.font = 'bold 12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(`${b.label} ${b.length_ft}×${b.width_ft}ft`, cx, cy);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.strokeText(text, cx, cy);
+    ctx.fillStyle = '#fff'; ctx.fillText(text, cx, cy);
   });
 
   // Scale bar derived from Mercator zoom (independent of bbox transform)

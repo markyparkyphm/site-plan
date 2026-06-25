@@ -288,6 +288,13 @@ function realizeParking(el, free, parcelFt, parcelTurf, frame, centroid, profile
   clipped.properties = {
     center_x_ft: cFt.x, center_y_ft: cFt.y,
     orientation_deg: 0, stall_count: actualStalls, accessibleStalls,
+    grid: {
+      ring: lateral ? [ring[0], ring[3], ring[2], ring[1]]
+                    : [ring[0], ring[1], ring[2], ring[3]],
+      rows, stallsPerRow,
+      stallDepthFt: profile.stallDepthFt ?? 18,
+      aisleFt:      profile.aisleFt ?? 24,
+    },
   };
 
   return {
