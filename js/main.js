@@ -10,6 +10,7 @@ import { score, PROFILES } from './score.js';
 import { optimizeLayout, optimizeArrangement, scoreAiSeeds, knobSig } from './optimize.js';
 import { realizeArrangement } from './arrange.js';
 import { checkGates } from './regulatory.js';
+import { checkProgramFits } from './feasibility.js';
 
 // Routes onSolve through realizeArrangement (Phase D/E arranger).
 const USE_ARRANGER = true;
@@ -42,6 +43,7 @@ let lastLayout = null;
 let aiHints = {};
 let detectedRoad = null;
 let roadOverlay  = null;
+let lastFeasibilityFit = null;
 
 // Schema optimizer worker state
 let optimizerWorker = null;
@@ -357,6 +359,51 @@ function getReqs() {
   };
 }
 
+function renderFeasibilityNotes(fit) {
+  const el = document.getElementById('warnings-panel');
+  el.innerHTML = '';
+  fit.blockers.forEach(msg => {
+    const d = document.createElement('div');
+    d.className = 'error-msg';
+    d.textContent = `⛔ ${msg}`;
+    el.appendChild(d);
+  });
+  fit.warnings.forEach(msg => {
+    const d = document.createElement('div');
+    d.className = 'warning-msg';
+    d.textContent = `⚠ ${msg}`;
+    el.appendChild(d);
+  });
+}
+
+function appendWarningNotes(notes) {
+  const el = document.getElementById('warnings-panel');
+  notes.forEach(msg => {
+    const d = document.createElement('div');
+    d.className = 'warning-msg';
+    d.textContent = `⚠ ${msg}`;
+    el.appendChild(d);
+  });
+}
+
+function appendFeasibilityWarnings() {
+  if (!lastFeasibilityFit || lastFeasibilityFit.warnings.length === 0) return;
+  appendWarningNotes(lastFeasibilityFit.warnings);
+}
+
+function flagDegradedWinner(layout, reqs, road) {
+  const notes = [];
+  const placed = layout.buildings.length;
+  if (placed < reqs.buildings.length)
+    notes.push(`Only ${placed}/${reqs.buildings.length} buildings placed — the rest didn’t fit.`);
+  const stalls = layout.parking_areas.reduce((s, p) => s + (p.properties?.stall_count ?? 0), 0);
+  if (reqs.parking_stalls > 0 && stalls < reqs.parking_stalls * 0.9)
+    notes.push(`Parking shortfall: ${stalls.toLocaleString()} of ${reqs.parking_stalls.toLocaleString()} stalls placed.`);
+  if (road?.line && layout.driveways.length === 0)
+    notes.push(`No driveway connects to the detected road — parking is stranded.`);
+  return notes;
+}
+
 function onSolve() {
   if (optimizerWorker) { optimizerWorker.terminate(); optimizerWorker = null; }
   document.getElementById('btn-cancel-optimize').style.display = 'none';
@@ -370,6 +417,15 @@ function onSolve() {
       const reqs = getReqs();
       const frontageVal = document.getElementById('input-frontage').value;
       const frontage = ['N','S','E','W'].includes(frontageVal) ? frontageVal : 'S';
+      const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
+      const fit = checkProgramFits(reqs, parcelFt, parcelAreaSqFt, frontage, PROFILES.retail);
+      lastFeasibilityFit = fit;
+      renderFeasibilityNotes(fit);
+      if (!fit.fits) {
+        document.getElementById('status').textContent =
+          `Program doesn’t fit this parcel — see notes below. Nothing was placed.`;
+        return;
+      }
       const setbackFt = parseFloat(document.getElementById('input-setback').value) || 20;
       const basinCorner = document.getElementById('input-basin-corner').value;
       const schema = buildTestSchema(reqs, frontage, setbackFt, basinCorner, aiHints.drivewaySide ?? null);
@@ -377,12 +433,16 @@ function onSolve() {
       const layout = layoutFromArrangement(elements);
       lastLayout = layout;
       renderLayout(layout, reqs, true, frontage);
+      appendFeasibilityWarnings();
+      const degradedNotes = flagDegradedWinner(layout, reqs, detectedRoad);
+      appendWarningNotes(degradedNotes);
       document.getElementById('btn-render').disabled = false;
       const bCount  = layout.buildings.length;
       const bTotal  = reqs.buildings.length;
       const warnTxt = layout.warnings.length ? ' | ' + layout.warnings.join('; ') : '';
+      const partialNote = degradedNotes.length ? ' · ⚠ partial layout' : '';
       document.getElementById('status').textContent =
-        `${bCount} / ${bTotal} buildings placed${warnTxt}`;
+        `${bCount} / ${bTotal} buildings placed${warnTxt}${partialNote}`;
     } catch (err) {
       console.error('[arrange] onSolve error:', err);
       document.getElementById('status').textContent = 'Error: ' + err.message;
@@ -567,6 +627,16 @@ async function onOptimize() {
   const reqs = getReqs();
 
   if (USE_SCHEMA_OPTIMIZER) {
+    const parcelAreaSqFt = polygonAreaSqFt(parcelFt);
+    const fit = checkProgramFits(reqs, parcelFt, parcelAreaSqFt, frontage, PROFILES.retail);
+    lastFeasibilityFit = fit;
+    renderFeasibilityNotes(fit);
+    if (!fit.fits) {
+      document.getElementById('status').textContent =
+        `Program doesn't fit this parcel — see notes below. Nothing was placed.`;
+      return;
+    }
+
     lastReqs     = reqs;
     lastFrontage = frontage;
 
@@ -639,15 +709,19 @@ async function onOptimize() {
         clearSolveOverlays();
         lastLayout = best.layout;
         renderLayout(best.layout, reqs, true, frontage);
+        appendFeasibilityWarnings();
+        const degradedNotes = flagDegradedWinner(best.layout, reqs, detectedRoad);
+        appendWarningNotes(degradedNotes);
         showSchemaOptimizerResult(ranked);
         document.getElementById('btn-render').disabled = false;
         const k         = best.schema._knobs;
         const aiNote    = newAi.length ? ` · ${newAi.length} AI` : '';
         const gateNote  = totalGated > 0 ? ` · ${totalGated} gated` : '';
         const capNote   = truncated ? ' · cap reached' : '';
+        const partialNote = degradedNotes.length ? ' · ⚠ partial layout' : '';
         document.getElementById('status').textContent =
           `Schema optimizer (P1+P2): ${ranked.length} feasible / ${totalTried} tried${aiNote}${gateNote}${capNote}` +
-          ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}`;
+          ` | Winner: setback ${k.setbackFt}ft, basin ${k.basinCorner}, align ${fmtAlignU(k.alignU)}${partialNote}`;
       }
     };
 
@@ -790,6 +864,7 @@ function onClear() {
   document.getElementById('btn-cancel-optimize').style.display = 'none';
   parcelLatLng = []; parcelFt = []; centroid = null;
   lastRanked = []; lastReqs = null;
+  lastFeasibilityFit = null;
   aiHints = {};
   clearSolveOverlays();
   if (setbackOverlay) { setbackOverlay.setMap(null); setbackOverlay = null; }

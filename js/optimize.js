@@ -68,7 +68,7 @@ function layoutFromElements(elements) {
 
 // Allocate `total` stalls across buildings proportional to GFA. Integer shares that
 // sum EXACTLY to `total`; remainder goes to the largest fractional parts.
-function splitStallsByGFA(buildings, total) {
+export function splitStallsByGFA(buildings, total) {
   if (total <= 0 || buildings.length === 0) return buildings.map(() => 0);
   const areas = buildings.map(b => b.length_ft * b.width_ft);
   const totalArea = areas.reduce((s, a) => s + a, 0) || 1;
