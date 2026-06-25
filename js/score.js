@@ -114,12 +114,20 @@ export function score(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile,
     reqs.buildings.length ? layout.buildings.length / reqs.buildings.length : 1);
 
   const reqStalls = reqs.parking_stalls ?? 0;
-  const gotStalls = layout.parking_areas[0]?.properties?.stall_count ?? 0;
+  const gotStalls = layout.parking_areas.reduce(
+    (s, p) => s + (p.properties?.stall_count ?? 0), 0);
   add('parkingMet', reqStalls ? clamp01(gotStalls / reqStalls) : 1);
 
-  if (layout.parking_areas[0] && layout.buildings.length) {
-    const pk = layout.parking_areas[0].properties;
-    const dPark = depthFromFront({ x: pk.center_x_ft, y: pk.center_y_ft }, frontage, b);
+  if (layout.parking_areas.length && layout.buildings.length) {
+    const totalStalls = layout.parking_areas.reduce(
+      (s, p) => s + (p.properties?.stall_count ?? 0), 0);
+    const dPark = totalStalls > 0
+      ? layout.parking_areas.reduce((s, p) =>
+          s + depthFromFront({ x: p.properties.center_x_ft, y: p.properties.center_y_ft }, frontage, b)
+            * (p.properties.stall_count ?? 0), 0) / totalStalls
+      : layout.parking_areas.reduce((s, p) =>
+          s + depthFromFront({ x: p.properties.center_x_ft, y: p.properties.center_y_ft }, frontage, b), 0)
+          / layout.parking_areas.length;
     const dBldg = layout.buildings.reduce((s, bl) =>
         s + depthFromFront({ x: bl.center_x_ft, y: bl.center_y_ft }, frontage, b), 0)
       / layout.buildings.length;

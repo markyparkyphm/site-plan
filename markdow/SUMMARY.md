@@ -23,6 +23,9 @@ Browser-based civil site-planning tool. User draws a parcel on a satellite map, 
 - **Optimizer label fix**: layout knob now shown in winner line and all candidate rows
 - **drivewayConnected fix**: when road exists but no driveway placed, score is 0 (not neutral 1); neutral only when no road detected
 - **road.js reliability**: `bboxMarginFt` 150→300, `maxDistFt` 300→500, `maxBearingDiffDeg` 35→45; automatic retry on timeout (12s then 18s); console diagnostics log which gate rejects each candidate road
+- **Styled 2D rendering** (`render.js` + `arrange.js`): buildings render with drop shadow, slate roof fill, inset parapet line, entry marker, haloed label; parking renders as dark asphalt field with white stall stripes (clipped per polygon, lateral reorder for left/right faces) + lighter aisle lines + stall-count label; driveways render as paved asphalt with dashed yellow centerline; basin renders as teal water body with inset waterline rings. `arrange.js` now exposes stall grid on `clipped.properties` (ring, rows, stallsPerRow, stallDepthFt, aisleFt) for the renderer.
+- **Driveway fixes** (`optimize.js` + `ai.js` + `main.js`): (1) `buildCandidateSchema` previously only added driveway elements when `face === 'front'` — left/right/rear parking had no driveway, costing −0.80 in score. Fixed: left face → `entryU:'left'`, right face → `entryU:'right'`, rear/front → full `driveways` knob. (2) `parseInstructions` now recognises `drivewaySide` (`'left'|'center'|'right'`) so user hints like "put driveway on west side" map correctly; `buildTestSchema` uses it to override the default `entryU`.
+- **Parking distribution scoring Phase 1** (`score.js` — **implemented, not yet committed**): `parkingMet` now sums `stall_count` across ALL `parking_areas` (was `[0]` only); `parkingInFront` uses a stall-weighted mean depth across all lots (was first lot only). Fixes silent under-scoring of `front+rear` and any future multi-lot distributed layouts. Phase 2 (per-building proportional allocation in `buildCandidateSchema`) is **next — use Plan Mode**.
 
 ---
 
@@ -259,7 +262,7 @@ scoreAiSeeds(seeds, parcelLngLat, reqs, frontage, profile, road)
 ```
 
 ### `buildCandidateSchema(reqs, frontage, knobs)`
-Assembles one schema from a knob-value point. `bSetbackFt = setbackFt + parkDepthFt`.
+Assembles one schema from a knob-value point. `bSetbackFt = setbackFt + parkDepthFt` (front parking depth from first building's face width). All `parkingFaces` split on `+`; each face gets its own parking element anchored to `firstBuildingId` (all stalls → building A). Every face also gets driveway elements: left face → `entryU:'left'`, right face → `entryU:'right'`, front/rear → full `driveways` knob. **Phase 2 of parking-distribution-spec will replace the single-anchor allocation with per-building proportional lots** — use Plan Mode.
 
 ### `knobSig(k)`
 Stable dedup key: `layout|gapFt|parkingFaces|driveways(sorted)|basinCorner|setbackFt|alignU|dl`
@@ -312,7 +315,8 @@ checkGates(layout, reqs, parcelFt, parcelAreaSqFt, frontage, profile)
 - Runs concurrently with worker spawn to hide latency
 
 ### `parseInstructions(text)`
-Returns `{ setbackFt?, clearanceFt?, basinCorner?, orientationPreference?, frontage? }` via Gemini.
+Returns `{ setbackFt?, clearanceFt?, basinCorner?, orientationPreference?, frontage?, drivewaySide? }` via Gemini.
+`drivewaySide` is `'left'|'center'|'right'` — lateral position of driveway entrance along the frontage. Used by `buildTestSchema` to override the default `entryU`. The AI prompt explains cardinal→relative mapping (e.g. "west" on N/S frontage = `'left'`).
 
 ---
 
@@ -363,6 +367,11 @@ Right-click `index.html` → Open with Live Server → `http://127.0.0.1:5500`
 
 ## Pending tasks
 
+### Immediate (next session)
+- **Parking distribution Phase 1 — commit** — `score.js` changes are implemented but not committed; commit + push before starting Phase 2
+- **Parking distribution Phase 2 — Plan Mode** — `buildCandidateSchema` in `optimize.js`: add `splitStallsByGFA` helper, allocate stalls per building proportional to GFA, emit one parking element per building per face anchored to that building, derive `bSetbackFt` from max per-building front depth. Spec is at `markdow/parking-distribution-spec.md` §2a–2d. **Do not start without Plan Mode.**
+
+### Subsequent
 - **Decision B (AI-proposer navigation)** — only once cap fires routinely; hand region-selection to AI proposer instead of brute-force enumeration; tune `topK`/refinement to spend budget on AI-suggested neighborhoods
 - **Perimeter / field lots** — new parking archetype: distribute stalls along parcel edges rather than anchoring to a building face
 - **Tune drivewayLength scoring knobs** — `lo=0.6, hi=1.0, falloff=0.5` are intuition-set; all are profile knobs
